@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Fredoka', ui-rounded, 'Comic Sans MS', sans-serif;
+  }
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Pulsing court targeting highlights */
+@keyframes court-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50% { opacity: 0.65; transform: scale(1.03); }
+}
+
+.animate-court-pulse {
+  animation: court-pulse 1.4s ease-in-out infinite;
+}
+
+/* Smooth custom scrollbars for rulebook / logs */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.6);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.8);
+}

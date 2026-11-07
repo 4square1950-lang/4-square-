@@ -1,0 +1,8 @@
+{
+  "name": "Remix Four Square: Schoolyard Showdown",
+  "description": "3D playground Four Square game featuring official league and schoolyard rules, authentic court physics, queue rotation, receiver faults, and championship climbs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
