@@ -230,10 +230,10 @@ export function calculateBallTrajectory(
   const vx = dx / duration;
   const vz = dz / duration;
 
-  // Ballistic arc with gravity g = 14
-  const g = 14;
-  // y(t) = y0 + vy * t - 0.5 * g * t^2 -> 0 = y0 + vy * duration - 0.5 * g * duration^2
-  const vy = (0.5 * g * duration * duration - startY) / duration;
+  // Ballistic arc matching physics loop gravity g = 9.8
+  const g = 9.8;
+  // y(t) = y0 + vy * t - 0.5 * g * t^2 -> 0.22 = y0 + vy * duration - 0.5 * g * duration^2
+  const vy = (0.22 - startY + 0.5 * g * duration * duration) / duration;
 
   return { vx, vy, vz, duration };
 }
@@ -286,9 +286,10 @@ export function executeHit(
     }
   }
 
-  const startX = state.ballState.x;
-  const startY = Math.max(0.6, state.ballState.y);
-  const startZ = state.ballState.z;
+  const serveHandPos = SQUARE_CONFIGS[hitter.rank].defaultPlayerPos;
+  const startX = isServe ? serveHandPos[0] * 0.88 : state.ballState.x;
+  const startY = isServe ? 0.92 : Math.max(0.55, state.ballState.y);
+  const startZ = isServe ? serveHandPos[2] * 0.88 : state.ballState.z;
 
   const { vx, vy, vz } = calculateBallTrajectory(
     startX,
@@ -303,7 +304,6 @@ export function executeHit(
   const updatedPlayers = state.players.map((p) =>
     p.id === hitterId ? { ...p, totalHits: p.totalHits + 1, points: (p.points || 0) + 25 } : p
   );
-
 
   const targetPlayer = state.players.find((p) => p.rank === targetSquare);
 
@@ -328,6 +328,7 @@ export function executeHit(
       hasBouncedThisPlay: false,
       isLive: true,
       isServing: false,
+      hitCount: (state.ballState.hitCount ?? 0) + 1,
     },
     refereeCall: {
       type: 'clean_hit',

@@ -20,16 +20,16 @@ export const CameraAnglesModal: React.FC<CameraAnglesModalProps> = ({
 
   const views: { id: CameraViewMode; title: string; desc: string; icon: React.ReactNode }[] = [
     {
-      id: 'first_person',
-      title: '1st Person (Immersive)',
-      desc: 'See the court directly through your character\'s eyes. Default experience.',
-      icon: <Eye className="w-5 h-5 text-amber-400" />,
+      id: 'third_person',
+      title: 'Wide Broadcast (Full Court Default)',
+      desc: 'Zoomed-out elevated stadium view showing all 4 squares, your player, and behind the school.',
+      icon: <User className="w-5 h-5 text-cyan-400" />,
     },
     {
-      id: 'third_person',
-      title: '3rd Person (Over-Shoulder)',
-      desc: 'Follow right behind your player with clear view of all 4 squares.',
-      icon: <User className="w-5 h-5 text-cyan-400" />,
+      id: 'first_person',
+      title: 'Corner Baseline Cam',
+      desc: 'Pulled behind your baseline corner looking across the whole court.',
+      icon: <Eye className="w-5 h-5 text-amber-400" />,
     },
     {
       id: 'isometric',

@@ -71,22 +71,33 @@ export function addCartoonEyes(
   pupilColor = 0x09090b
 ) {
   const eyeWhiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const irisMat = new THREE.MeshBasicMaterial({ color: 0x1e293b });
   const pupilMat = new THREE.MeshBasicMaterial({ color: pupilColor });
   const glintMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const browMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.65 });
 
-  [-spacing / 2, spacing / 2].forEach((xOff) => {
+  [-spacing / 2, spacing / 2].forEach((xOff, idx) => {
     const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 14, 14), eyeWhiteMat);
     eyeWhite.position.set(xOff, y, z);
     eyeWhite.scale.set(1, 1.25, 0.5);
 
-    const pupil = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 0.6, 12, 12), pupilMat);
-    pupil.position.set(xOff, y, z + eyeRadius * 0.38);
+    const iris = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 0.72, 12, 12), irisMat);
+    iris.position.set(xOff, y, z + eyeRadius * 0.30);
+    iris.scale.set(1, 1.25, 0.5);
+
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 0.52, 12, 12), pupilMat);
+    pupil.position.set(xOff, y, z + eyeRadius * 0.40);
     pupil.scale.set(1, 1.25, 0.5);
 
     const glint = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius * 0.22, 8, 8), glintMat);
-    glint.position.set(xOff + eyeRadius * 0.2, y + eyeRadius * 0.25, z + eyeRadius * 0.48);
+    glint.position.set(xOff + eyeRadius * 0.2, y + eyeRadius * 0.25, z + eyeRadius * 0.50);
 
-    parent.add(eyeWhite, pupil, glint);
+    // Expressive sculpted eyebrow ridge
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(eyeRadius * 1.45, eyeRadius * 0.34, eyeRadius * 0.35), browMat);
+    brow.position.set(xOff, y + eyeRadius * 1.38, z + eyeRadius * 0.25);
+    brow.rotation.z = idx === 0 ? 0.1 : -0.1;
+
+    parent.add(eyeWhite, iris, pupil, glint, brow);
   });
 
   // Calculate face curvature for mouth placement so it is securely mounted flush to the skull
@@ -163,7 +174,8 @@ export function addExpressiveMouth(
 }
 
 /**
- * Builds an articulated hand group with palm, thumb, and 4 individual fingers.
+ * Builds an articulated anatomical hand group with a sculpted beveled palm,
+ * palmar cushion, opposable 2-segment thumb, and 4 curved 2-phalanx fingers.
  */
 export function buildArticulatedHand(
   skinMat: THREE.Material,
@@ -171,40 +183,113 @@ export function buildArticulatedHand(
 ): THREE.Group {
   const handGroup = new THREE.Group();
   handGroup.name = isRight ? 'rightHandGroup' : 'leftHandGroup';
+  const side = isRight ? 1 : -1;
 
-  // 1. Curved Cartoon Open Palm Pad (matching uploaded reference slap/high-five mitts)
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.070, 0.026), skinMat);
-  palm.position.set(0, -0.035, 0);
+  // 1. Seamless Wrist Transition Joint
+  const wrist = new THREE.Mesh(new THREE.SphereGeometry(0.041, 14, 12), skinMat);
+  wrist.scale.set(1.04, 0.82, 0.78);
+  wrist.position.set(0, 0.002, 0);
+  handGroup.add(wrist);
+
+  // 2. Sculpted Contoured & Beveled Metacarpal Palm (trapezoid silhouette with anatomical knuckle arch)
+  const palmShape = new THREE.Shape();
+  palmShape.moveTo(-0.029, -0.004);
+  palmShape.lineTo(0.029, -0.004);
+  palmShape.quadraticCurveTo(0.044, -0.036, 0.041, -0.068);
+  palmShape.quadraticCurveTo(0.018, -0.076, 0, -0.075);
+  palmShape.quadraticCurveTo(-0.022, -0.076, -0.041, -0.065);
+  palmShape.quadraticCurveTo(-0.043, -0.034, -0.029, -0.004);
+
+  const palmGeo = new THREE.ExtrudeGeometry(palmShape, {
+    depth: 0.020,
+    bevelEnabled: true,
+    bevelThickness: 0.011,
+    bevelSize: 0.0085,
+    bevelSegments: 3,
+    curveSegments: 8,
+  });
+  palmGeo.translate(0, 0, -0.010);
+  if (!isRight) {
+    palmGeo.scale(-1, 1, 1);
+  }
+  const palm = new THREE.Mesh(palmGeo, skinMat);
   palm.castShadow = true;
   handGroup.add(palm);
 
-  // Cupped Palm Heel Base
-  const heel = new THREE.Mesh(new THREE.SphereGeometry(0.036, 12, 10), skinMat);
-  heel.scale.set(1.15, 0.65, 0.55);
-  heel.position.set(0, -0.018, 0.006);
-  handGroup.add(heel);
+  // Thenar (thumb-base) muscle cushion on palmar face for lifelike hand volume
+  const thenarPad = new THREE.Mesh(new THREE.SphereGeometry(0.026, 12, 10), skinMat);
+  thenarPad.scale.set(0.95, 1.32, 0.75);
+  thenarPad.position.set(side * 0.024, -0.034, 0.012);
+  thenarPad.rotation.z = -side * 0.25;
+  handGroup.add(thenarPad);
 
-  // 2. Cartoon Angled Thumb
-  const thumb = new THREE.Mesh(new THREE.SphereGeometry(0.02, 12, 10), skinMat);
-  thumb.scale.set(1.3, 0.85, 0.75);
-  const thumbX = isRight ? -0.044 : 0.044;
-  thumb.position.set(thumbX, -0.03, 0.008);
-  thumb.rotation.z = isRight ? 0.65 : -0.65;
-  handGroup.add(thumb);
+  // 3. Opposable 2-Phalanx Articulated Thumb
+  const thumbPivot = new THREE.Group();
+  thumbPivot.name = 'thumbPivot';
+  thumbPivot.position.set(side * 0.041, -0.026, 0.010);
+  thumbPivot.rotation.z = -side * 0.62;
+  thumbPivot.rotation.x = -0.32;
 
-  // 3. 4 Cartoon Finger Pads (Rounded open mitt)
-  const fingerOffsets = [
-    { x: -0.028, y: -0.076, radius: 0.014 }, // Index
-    { x: -0.009, y: -0.082, radius: 0.015 }, // Middle
-    { x: 0.009, y: -0.080, radius: 0.014 },  // Ring
-    { x: 0.028, y: -0.072, radius: 0.012 },  // Pinky
+  const thumbBaseJoint = new THREE.Mesh(new THREE.SphereGeometry(0.017, 10, 8), skinMat);
+  const thumbProx = new THREE.Mesh(new THREE.CylinderGeometry(0.0155, 0.014, 0.032, 10), skinMat);
+  thumbProx.position.set(0, -0.016, 0);
+  thumbProx.castShadow = true;
+
+  const thumbDistPivot = new THREE.Group();
+  thumbDistPivot.position.set(0, -0.032, 0);
+  thumbDistPivot.rotation.z = side * 0.28;
+  thumbDistPivot.rotation.x = -0.22;
+
+  const thumbKnuckle = new THREE.Mesh(new THREE.SphereGeometry(0.014, 10, 8), skinMat);
+  const thumbDist = new THREE.Mesh(new THREE.CylinderGeometry(0.0135, 0.0105, 0.027, 10), skinMat);
+  thumbDist.position.set(0, -0.0135, 0);
+  const thumbTip = new THREE.Mesh(new THREE.SphereGeometry(0.0108, 10, 8), skinMat);
+  thumbTip.position.set(0, -0.027, 0);
+
+  thumbDistPivot.add(thumbKnuckle, thumbDist, thumbTip);
+  thumbPivot.add(thumbBaseJoint, thumbProx, thumbDistPivot);
+  handGroup.add(thumbPivot);
+
+  // 4. 4 Articulated 2-Phalanx Curved Fingers (Index, Middle, Ring, Pinky)
+  const fingers = [
+    { x: side * 0.032, y: -0.072, r: 0.0132, proxLen: 0.035, distLen: 0.027, spreadZ: -side * 0.08, curlX: -0.18 }, // Index
+    { x: side * 0.010, y: -0.075, r: 0.0138, proxLen: 0.040, distLen: 0.030, spreadZ: -side * 0.02, curlX: -0.20 }, // Middle
+    { x: side * -0.012, y: -0.073, r: 0.0130, proxLen: 0.036, distLen: 0.027, spreadZ: side * 0.04, curlX: -0.23 }, // Ring
+    { x: side * -0.032, y: -0.067, r: 0.0114, proxLen: 0.028, distLen: 0.022, spreadZ: side * 0.11, curlX: -0.27 }, // Pinky
   ];
 
-  fingerOffsets.forEach((f) => {
-    const pad = new THREE.Mesh(new THREE.SphereGeometry(f.radius, 12, 10), skinMat);
-    pad.scale.set(0.9, 1.35, 0.7);
-    pad.position.set(isRight ? f.x : -f.x, f.y, 0.003);
-    handGroup.add(pad);
+  fingers.forEach((f) => {
+    const fPivot = new THREE.Group();
+    fPivot.position.set(f.x, f.y, 0.002);
+    fPivot.rotation.z = f.spreadZ;
+    fPivot.rotation.x = f.curlX;
+
+    const mcp = new THREE.Mesh(new THREE.SphereGeometry(f.r, 10, 8), skinMat);
+    const prox = new THREE.Mesh(
+      new THREE.CylinderGeometry(f.r * 0.96, f.r * 0.85, f.proxLen, 10),
+      skinMat
+    );
+    prox.position.set(0, -f.proxLen / 2, 0);
+    prox.castShadow = true;
+
+    const pipPivot = new THREE.Group();
+    pipPivot.position.set(0, -f.proxLen, 0);
+    pipPivot.rotation.x = f.curlX * 1.15;
+
+    const pip = new THREE.Mesh(new THREE.SphereGeometry(f.r * 0.86, 10, 8), skinMat);
+    const dist = new THREE.Mesh(
+      new THREE.CylinderGeometry(f.r * 0.84, f.r * 0.68, f.distLen, 10),
+      skinMat
+    );
+    dist.position.set(0, -f.distLen / 2, 0);
+    dist.castShadow = true;
+
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(f.r * 0.69, 10, 8), skinMat);
+    tip.position.set(0, -f.distLen, 0);
+
+    pipPivot.add(pip, dist, tip);
+    fPivot.add(mcp, prox, pipPivot);
+    handGroup.add(fPivot);
   });
 
   return handGroup;
@@ -356,7 +441,7 @@ export function attachAccessories(
     const chain = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.02, 8, 20), goldMat);
     chain.rotateX(Math.PI / 2.3);
     chain.position.set(0, 0.84, 0.08);
-    accGroup.add(chain);
+    parentGroup.add(chain);
   }
 
   // Standalone DJ Headphones
@@ -372,18 +457,35 @@ export function attachAccessories(
     accGroup.add(band);
   }
 
-  // Wristbands
+  // Wristbands attached directly to articulated forearms when available
   if (custom.hasWristbands) {
     const wbMat = new THREE.MeshStandardMaterial({ color: custom.wristbandColor || '#F59E0B' });
-    const wbL = new THREE.Mesh(new THREE.TorusGeometry(0.062, 0.018, 8, 16), wbMat);
-    wbL.rotateX(Math.PI / 2);
-    wbL.position.set(-0.32, 0.52, 0);
-    const wbR = wbL.clone();
-    wbR.position.set(0.32, 0.52, 0);
-    accGroup.add(wbL, wbR);
+    const leftForearm = parentGroup.getObjectByName('leftForearm') as THREE.Group | undefined;
+    const rightForearm = parentGroup.getObjectByName('rightForearm') as THREE.Group | undefined;
+    if (leftForearm && rightForearm) {
+      const wbL = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.052, 0.055, 14), wbMat);
+      wbL.position.set(0, -0.14, 0);
+      const wbR = wbL.clone();
+      leftForearm.add(wbL);
+      rightForearm.add(wbR);
+    } else {
+      const wbL = new THREE.Mesh(new THREE.TorusGeometry(0.062, 0.018, 8, 16), wbMat);
+      wbL.rotateX(Math.PI / 2);
+      wbL.position.set(-0.32, 0.52, 0);
+      const wbR = wbL.clone();
+      wbR.position.set(0.32, 0.52, 0);
+      parentGroup.add(wbL, wbR);
+    }
   }
 
-  parentGroup.add(accGroup);
+  // Mount head-level accessories onto headMesh group so headgear follows head turns!
+  const headMeshObj = parentGroup.getObjectByName('headMesh');
+  if (headMeshObj && headMeshObj instanceof THREE.Group) {
+    accGroup.position.set(0, -headMeshObj.position.y, 0);
+    headMeshObj.add(accGroup);
+  } else {
+    parentGroup.add(accGroup);
+  }
 }
 
 /**
@@ -396,75 +498,67 @@ export function addArms(
   sleeveMatL: THREE.Material,
   sleeveMatR: THREE.Material
 ) {
-  const cuffGeo = new THREE.TorusGeometry(0.076, 0.015, 8, 16);
+  const cuffGeo = new THREE.TorusGeometry(0.078, 0.016, 10, 18);
   cuffGeo.rotateX(Math.PI / 2);
 
-  // Left arm pivot (spaced out from torso to prevent body clipping)
-  const leftArm = new THREE.Group();
-  leftArm.name = 'leftArm';
-  leftArm.position.set(-0.285, 0.76, 0.035);
+  const buildSingleArm = (isRight: boolean, sleeveMat: THREE.Material) => {
+    const side = isRight ? 1 : -1;
+    const armPivot = new THREE.Group();
+    armPivot.name = isRight ? 'rightArm' : 'leftArm';
+    armPivot.position.set(side * 0.258, 0.77, 0.02);
 
-  // Sculpted anatomical shoulder deltoid cap (smooth rounded contour)
+    // Naturally proportioned athletic deltoid shoulder cap & jersey sleeve
+    const deltoid = new THREE.Mesh(new THREE.SphereGeometry(0.086, 18, 16), sleeveMat);
+    deltoid.scale.set(1.06, 0.96, 0.96);
+    deltoid.position.set(side * 0.01, 0.01, 0);
+    deltoid.castShadow = true;
 
-  const deltoidL = new THREE.Mesh(new THREE.SphereGeometry(0.115, 18, 16), sleeveMatL);
-  deltoidL.scale.set(1.22, 1.1, 1.05);
-  deltoidL.position.set(-0.015, 0.02, 0);
-  deltoidL.castShadow = true;
+    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.068, 0.13, 14), sleeveMat);
+    sleeve.position.set(0, -0.05, 0);
+    sleeve.castShadow = true;
 
-  const sleeveL = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.072, 0.13, 14), sleeveMatL);
-  sleeveL.position.set(0, -0.05, 0);
+    const cuff = new THREE.Mesh(cuffGeo, sleeveMat);
+    cuff.scale.setScalar(0.92);
+    cuff.position.set(0, -0.112, 0);
 
-  const cuffL = new THREE.Mesh(cuffGeo, sleeveMatL);
-  cuffL.position.set(0, -0.115, 0);
+    // Upper bicep/arm down to elbow joint
+    const upperArm = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.053, 0.14, 12), skinMat);
+    upperArm.position.set(side * 0.008, -0.175, 0.01);
+    upperArm.rotation.z = -side * 0.07;
+    upperArm.castShadow = true;
 
-  const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.05, 0.25, 12), skinMat);
-  armL.position.set(-0.015, -0.21, 0.03);
-  armL.rotation.z = 0.12;
+    // Articulated Elbow Joint & Forearm Pivot
+    const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.051, 12, 10), skinMat);
+    elbow.position.set(side * 0.014, -0.245, 0.015);
 
-  // Left hand attached directly to wrist base of armL
-  const handL = buildArticulatedHand(skinMat, false);
-  handL.position.set(0, -0.13, 0);
-  armL.add(handL);
+    const forearmPivot = new THREE.Group();
+    forearmPivot.name = isRight ? 'rightForearm' : 'leftForearm';
+    forearmPivot.position.set(side * 0.014, -0.245, 0.015);
+    // Natural athletic ready bend forward at the elbow
+    forearmPivot.rotation.x = -0.32;
 
-  leftArm.add(deltoidL, sleeveL, cuffL, armL);
-  parent.add(leftArm);
+    const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.044, 0.18, 12), skinMat);
+    forearm.position.set(0, -0.09, 0);
+    forearm.castShadow = true;
 
-  // Right arm pivot (Primary striking arm - spaced out to prevent chest clipping)
-  const rightArm = new THREE.Group();
-  rightArm.name = 'rightArm';
-  rightArm.position.set(0.285, 0.76, 0.035);
+    const hand = buildArticulatedHand(skinMat, isRight);
+    hand.position.set(0, -0.182, 0);
+    if (isRight) {
+      hand.name = 'strikeHand';
+    } else {
+      hand.name = 'leftStrikeHand';
+    }
 
-  // Sculpted anatomical shoulder deltoid cap
-  const deltoidR = new THREE.Mesh(new THREE.SphereGeometry(0.115, 18, 16), sleeveMatR);
-  deltoidR.scale.set(1.22, 1.1, 1.05);
-  deltoidR.position.set(0.015, 0.02, 0);
-  deltoidR.castShadow = true;
+    forearmPivot.add(forearm, hand);
+    armPivot.add(deltoid, sleeve, cuff, upperArm, elbow, forearmPivot);
+    return armPivot;
+  };
 
-  const sleeveR = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.072, 0.13, 14), sleeveMatR);
-  sleeveR.position.set(0, -0.05, 0);
-
-  const cuffR = new THREE.Mesh(cuffGeo, sleeveMatR);
-  cuffR.position.set(0, -0.115, 0);
-
-  const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.05, 0.25, 12), skinMat);
-  armR.position.set(0.015, -0.21, 0.03);
-  armR.rotation.z = -0.12;
-
-  // Right hand attached directly to wrist base of armR
-  const handR = buildArticulatedHand(skinMat, true);
-  handR.position.set(0, -0.13, 0);
-  handR.name = 'strikeHand';
-  armR.add(handR);
-
-  rightArm.add(deltoidR, sleeveR, cuffR, armR);
-  parent.add(rightArm);
+  parent.add(buildSingleArm(false, sleeveMatL), buildSingleArm(true, sleeveMatR));
 }
 
 /**
- * Adds high-top sneakers and legs with hip pivot groups for walking animations.
- */
-/**
- * Adds sleek rounded athletic running sneakers and legs with hip pivot groups for walking animations.
+ * Adds sleek rounded athletic running sneakers and articulated hip/thigh/knee/shin legs.
  */
 export function addLegsAndSneakers(
   parent: THREE.Group,
@@ -475,55 +569,72 @@ export function addLegsAndSneakers(
 ) {
   const half = spacing / 2;
   const rubberWhiteMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.25 });
+  const laceMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
 
   [-half, half].forEach((xPos, idx) => {
     const legGroup = new THREE.Group();
     legGroup.name = idx === 0 ? 'leftLeg' : 'rightLeg';
     legGroup.position.set(xPos, 0.38, 0);
 
-    // Solid Upper Thigh & Shorts Cuff Socket (bridges seamlessly into pelvis with zero gap)
+    // Upper Thigh & Shorts Cuff Socket (bridges seamlessly into pelvis)
     const thighSocket = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.082, 0.074, 0.14, 14),
+      new THREE.CylinderGeometry(0.086, 0.076, 0.15, 14),
       trimMat || skinMat
     );
-    thighSocket.position.set(0, 0.02, 0);
+    thighSocket.position.set(0, 0.01, 0);
     thighSocket.castShadow = true;
 
-    // Anatomical leg cylinder extending from inside the thigh socket down to ankle
-    const legMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.068, 0.058, 0.28, 12), skinMat);
-    legMesh.position.set(0, -0.12, 0);
-    legMesh.castShadow = true;
+    // Lower thigh cylinder to knee
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.064, 0.13, 12), skinMat);
+    thigh.position.set(0, -0.09, 0);
+    thigh.castShadow = true;
 
-    // Sleek Rounded Sneaker Body (Rounded Capsule / Cylinder)
+    // Articulated Knee Joint & Shin Pivot
+    const knee = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 10), skinMat);
+    knee.position.set(0, -0.16, 0);
+
+    const shinPivot = new THREE.Group();
+    shinPivot.name = idx === 0 ? 'leftShin' : 'rightShin';
+    shinPivot.position.set(0, -0.16, 0);
+
+    const calf = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.052, 0.14, 12), skinMat);
+    calf.position.set(0, -0.065, 0);
+    calf.castShadow = true;
+
+    // Detailed Multi-Part Athletic Sneaker
     const shoeBodyGroup = new THREE.Group();
-    shoeBodyGroup.position.set(0, -0.28, 0.03);
+    shoeBodyGroup.position.set(0, -0.13, 0.03);
 
-    // Rounded Upper Sneaker Heel & Tongue
-    const shoeUpper = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.082, 0.12, 16), shoeMat);
-    shoeUpper.position.set(0, 0.02, 0);
+    const shoeUpper = new THREE.Mesh(new THREE.CylinderGeometry(0.074, 0.082, 0.11, 16), shoeMat);
+    shoeUpper.position.set(0, 0.015, -0.01);
     shoeUpper.castShadow = true;
 
-    // Curved Rounded Toe Cap (Smooth rounded front)
     const toeCap = new THREE.Mesh(new THREE.SphereGeometry(0.078, 16, 12), shoeMat);
-    toeCap.scale.set(0.95, 0.75, 1.3);
-    toeCap.position.set(0, -0.02, 0.06);
+    toeCap.scale.set(0.96, 0.72, 1.32);
+    toeCap.position.set(0, -0.02, 0.055);
+    toeCap.castShadow = true;
 
-    // Curved Outsole Rubber Tread Rim
-    const rubberSole = new THREE.Mesh(new THREE.CylinderGeometry(0.088, 0.092, 0.035, 16), rubberWhiteMat);
-    rubberSole.scale.set(0.95, 1, 1.35);
-    rubberSole.position.set(0, -0.055, 0.03);
+    // Crisp Athletic Lace Straps & Midsole Cushion
+    const lace1 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.016, 0.03), laceMat);
+    lace1.position.set(0, 0.035, 0.055);
+    lace1.rotation.x = 0.35;
+    const lace2 = lace1.clone();
+    lace2.position.set(0, 0.02, 0.08);
 
-    // Accent Side Stripe
-    const sideStripe = new THREE.Mesh(new THREE.BoxGeometry(0.155, 0.022, 0.10), trimMat);
-    sideStripe.position.set(0, 0.01, 0.02);
+    const rubberSole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.094, 0.038, 16), rubberWhiteMat);
+    rubberSole.scale.set(0.96, 1, 1.36);
+    rubberSole.position.set(0, -0.052, 0.025);
 
-    // Ankle Collar Ring bridging leg cylinder to shoe collar
-    const ankleCuff = new THREE.Mesh(new THREE.TorusGeometry(0.065, 0.015, 8, 16), trimMat);
+    const sideStripe = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.022, 0.10), trimMat);
+    sideStripe.position.set(0, 0.005, 0.015);
+
+    const ankleCuff = new THREE.Mesh(new THREE.TorusGeometry(0.064, 0.016, 8, 16), trimMat);
     ankleCuff.rotateX(Math.PI / 2);
-    ankleCuff.position.set(0, 0.07, 0);
+    ankleCuff.position.set(0, 0.062, -0.01);
 
-    shoeBodyGroup.add(shoeUpper, toeCap, rubberSole, sideStripe, ankleCuff);
-    legGroup.add(thighSocket, legMesh, shoeBodyGroup);
+    shoeBodyGroup.add(shoeUpper, toeCap, lace1, lace2, rubberSole, sideStripe, ankleCuff);
+    shinPivot.add(calf, shoeBodyGroup);
+    legGroup.add(thighSocket, thigh, knee, shinPivot);
     parent.add(legGroup);
   });
 }
@@ -615,23 +726,25 @@ export function buildCharacterMesh(
       const leftArm = new THREE.Group();
       leftArm.name = 'leftArm';
       leftArm.position.set(-0.42, 0.85, 0);
-      const sleeveL = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.075, 0.16, 10), armBlueMat);
-      const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.055, 0.26, 10), handGreenMat);
-      armL.position.set(-0.04, -0.18, 0.04);
-      const handL = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 10), handGreenMat);
-      handL.position.set(-0.08, -0.34, 0.08);
-      leftArm.add(sleeveL, armL, handL);
+      const sleeveL = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.07, 0.16, 10), armBlueMat);
+      const armL = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.046, 0.24, 10), handGreenMat);
+      armL.position.set(-0.04, -0.17, 0.04);
+      const handL = buildArticulatedHand(handGreenMat, false);
+      handL.position.set(0, -0.12, 0);
+      armL.add(handL);
+      leftArm.add(sleeveL, armL);
 
       const rightArm = new THREE.Group();
       rightArm.name = 'rightArm';
       rightArm.position.set(0.42, 0.85, 0);
-      const sleeveR = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.075, 0.16, 10), armBlueMat);
-      const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.055, 0.26, 10), handGreenMat);
-      armR.position.set(0.04, -0.18, 0.04);
-      const handR = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 10), handGreenMat);
-      handR.position.set(0.08, -0.34, 0.08);
+      const sleeveR = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.07, 0.16, 10), armBlueMat);
+      const armR = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.046, 0.24, 10), handGreenMat);
+      armR.position.set(0.04, -0.17, 0.04);
+      const handR = buildArticulatedHand(handGreenMat, true);
+      handR.position.set(0, -0.12, 0);
       handR.name = 'strikeHand';
-      rightArm.add(sleeveR, armR, handR);
+      armR.add(handR);
+      rightArm.add(sleeveR, armR);
 
       blockyGroup.add(leftArm, rightArm);
 
@@ -1922,14 +2035,27 @@ export function buildCustomizablePlayerMesh(
     torsoGroup.add(trapezius, chest, waist, pecL, pecR, neck, collar);
     bodyGroup.add(torsoGroup);
 
-    // Head with Scaled Anatomy elevated above visible neck
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 24, 20), skinMat);
-    head.position.set(0, 1.22, 0);
-    head.castShadow = true;
-    head.name = 'headMesh';
-    bodyGroup.add(head);
+    // Head Group with Scaled Anatomy elevated above visible neck (keeps face, hair & hat unified on head turns)
+    const headGroup = new THREE.Group();
+    headGroup.name = 'headMesh';
+    headGroup.position.set(0, 1.22, 0);
 
-    addCartoonEyes(bodyGroup, 1.22, 0.21);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 24, 20), skinMat);
+    head.castShadow = true;
+    headGroup.add(head);
+
+    // Ears & Nose Contour
+    const earL = new THREE.Mesh(new THREE.SphereGeometry(0.048, 10, 10), skinMat);
+    earL.scale.set(0.55, 1.0, 0.7);
+    earL.position.set(-0.23, 0, 0);
+    const earR = earL.clone();
+    earR.position.set(0.23, 0, 0);
+    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.034, 10, 10), skinMat);
+    nose.scale.set(0.9, 0.85, 1.2);
+    nose.position.set(0, -0.03, 0.235);
+    headGroup.add(earL, earR, nose);
+
+    addCartoonEyes(headGroup, 0.0, 0.21);
 
     // Sculpted Hair when no hat/cap is worn
     const hairColor = custom.hairColor || '#451A03';
@@ -1940,17 +2066,17 @@ export function buildCustomizablePlayerMesh(
         new THREE.SphereGeometry(0.248, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.52),
         hairMat
       );
-      hairCap.position.set(0, 1.24, -0.01);
+      hairCap.position.set(0, 0.02, -0.01);
 
       // Spiky / fade front locks
       for (let s = -3; s <= 3; s++) {
         const spike = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.08, 5), hairMat);
-        spike.position.set(s * 0.045, 1.41, 0.12 - Math.abs(s) * 0.02);
+        spike.position.set(s * 0.045, 0.19, 0.12 - Math.abs(s) * 0.02);
         spike.rotation.x = 0.4;
         spike.rotation.z = -s * 0.12;
-        bodyGroup.add(spike);
+        headGroup.add(spike);
       }
-      bodyGroup.add(hairCap);
+      headGroup.add(hairCap);
     }
 
     // Headgear
@@ -1960,30 +2086,32 @@ export function buildCustomizablePlayerMesh(
         new THREE.SphereGeometry(0.25, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.52),
         hatMat
       );
-      cap.position.set(0, 1.26, 0);
+      cap.position.set(0, 0.04, 0);
       const visor = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.03, 0.18), hatMat);
-      visor.position.set(0, 1.32, -0.16);
-      bodyGroup.add(cap, visor);
+      visor.position.set(0, 0.10, -0.16);
+      headGroup.add(cap, visor);
     } else if (custom.hatType === 'crown') {
       const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.22, 0.22, 5), goldMat);
-      crown.position.set(0, 1.52, 0);
-      bodyGroup.add(crown);
+      crown.position.set(0, 0.30, 0);
+      headGroup.add(crown);
     } else if (custom.hatType === 'headband') {
       const headband = new THREE.Mesh(
         new THREE.TorusGeometry(0.24, 0.03, 8, 20),
         new THREE.MeshStandardMaterial({ color: custom.hatColor || 0x06b6d4 })
       );
       headband.rotateX(Math.PI / 2);
-      headband.position.set(0, 1.27, 0);
-      bodyGroup.add(headband);
+      headband.position.set(0, 0.05, 0);
+      headGroup.add(headband);
     }
+
+    bodyGroup.add(headGroup);
 
     // Sunglasses & Chains
     if (custom.hasShades) {
       const shadesMat = new THREE.MeshStandardMaterial({ color: custom.shadesColor || 0x0f172a });
       const shades = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 0.04), shadesMat);
-      shades.position.set(0, 1.23, 0.23);
-      bodyGroup.add(shades);
+      shades.position.set(0, 0.01, 0.23);
+      headGroup.add(shades);
     }
     if (custom.hasGoldChain) {
       const chain = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.02, 8, 20), goldMat);
@@ -2378,21 +2506,78 @@ export function buildRefereeModel(): THREE.Group {
   return grp;
 }
 
+export function applySeatedDriverPose(
+  charRoot: THREE.Group,
+  seatedFactor: number,
+  steerAngle = 0
+) {
+  const f = THREE.MathUtils.clamp(seatedFactor, 0, 1);
+  const leftLeg = charRoot.getObjectByName('leftLeg') as THREE.Group | undefined;
+  const rightLeg = charRoot.getObjectByName('rightLeg') as THREE.Group | undefined;
+  const leftShin = charRoot.getObjectByName('leftShin') as THREE.Group | undefined;
+  const rightShin = charRoot.getObjectByName('rightShin') as THREE.Group | undefined;
+  const leftArm = charRoot.getObjectByName('leftArm') as THREE.Group | undefined;
+  const rightArm = charRoot.getObjectByName('rightArm') as THREE.Group | undefined;
+  const leftForearm = charRoot.getObjectByName('leftForearm') as THREE.Group | undefined;
+  const rightForearm = charRoot.getObjectByName('rightForearm') as THREE.Group | undefined;
+  const torso = charRoot.getObjectByName('torsoMesh') as THREE.Object3D | undefined;
+  const head = charRoot.getObjectByName('headMesh') as THREE.Object3D | undefined;
+
+  // Flex hips forward (+Z) and bend knees downward (-Y) cleanly into cabin footwell
+  if (leftLeg) {
+    leftLeg.rotation.x = THREE.MathUtils.lerp(0, -1.48, f);
+    leftLeg.rotation.y = THREE.MathUtils.lerp(0, -0.06, f);
+  }
+  if (rightLeg) {
+    rightLeg.rotation.x = THREE.MathUtils.lerp(0, -1.48, f);
+    rightLeg.rotation.y = THREE.MathUtils.lerp(0, 0.06, f);
+  }
+  if (leftShin) leftShin.rotation.x = THREE.MathUtils.lerp(0, 1.38, f);
+  if (rightShin) rightShin.rotation.x = THREE.MathUtils.lerp(0, 1.38, f);
+
+  // Reach arms forward onto steering wheel rim with subtle steering turn response
+  const wheelPitch = steerAngle * 0.45;
+  if (leftArm) {
+    leftArm.rotation.x = THREE.MathUtils.lerp(0, -0.92 - wheelPitch, f);
+    leftArm.rotation.z = THREE.MathUtils.lerp(0, 0.18, f);
+    leftArm.rotation.y = THREE.MathUtils.lerp(0, 0.22, f);
+  }
+  if (rightArm) {
+    rightArm.rotation.x = THREE.MathUtils.lerp(0, -0.92 + wheelPitch, f);
+    rightArm.rotation.z = THREE.MathUtils.lerp(0, -0.18, f);
+    rightArm.rotation.y = THREE.MathUtils.lerp(0, -0.22, f);
+  }
+  if (leftForearm) leftForearm.rotation.x = THREE.MathUtils.lerp(-0.32, -0.62, f);
+  if (rightForearm) rightForearm.rotation.x = THREE.MathUtils.lerp(-0.32, -0.62, f);
+
+  // Slight reclined athletic driving posture & head look into turns
+  if (torso) torso.rotation.x = THREE.MathUtils.lerp(0, -0.08, f);
+  if (head) {
+    head.rotation.x = THREE.MathUtils.lerp(0, 0.05, f);
+    head.rotation.y = THREE.MathUtils.lerp(0, -steerAngle * 0.6, f);
+  }
+}
+
 export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.Group {
   const car = new THREE.Group();
   car.name = 'roadTripCar';
 
+  // Sprung body wrapper so suspension pitch/roll/bounce never lifts tires off pavement
+  const carBody = new THREE.Group();
+  carBody.name = 'carBodyGroup';
+  car.add(carBody);
+
   const bodyPaint = new THREE.MeshStandardMaterial({
     color: bodyColor,
-    roughness: 0.25,
-    metalness: 0.65,
+    roughness: 0.24,
+    metalness: 0.62,
   });
-  const darkGlass = new THREE.MeshStandardMaterial({
+  const cabinGlass = new THREE.MeshStandardMaterial({
     color: 0x0f172a,
-    roughness: 0.1,
-    metalness: 0.85,
+    roughness: 0.08,
+    metalness: 0.78,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.38,
   });
   const chromeMat = new THREE.MeshStandardMaterial({
     color: 0xe2e8f0,
@@ -2403,17 +2588,41 @@ export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.G
   const rimMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.85 });
   const headlightMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
   const taillightMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-  const interiorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.8 });
+  const interiorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.82 });
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.92 });
+  const seatTrimMat = new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.7 });
 
-  // 1. Lower Chassis / Main Body
-  const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.65, 4.2), bodyPaint);
-  chassis.position.set(0, 0.6, 0);
-  chassis.castShadow = true;
-  chassis.receiveShadow = true;
-  chassis.name = 'chassisMesh';
-  car.add(chassis);
+  // 1. Hollow Chassis: Engine Hood, Rear Cargo/Trunk, Floorpan & Side Rocker Sills
+  const frontHood = new THREE.Mesh(new THREE.BoxGeometry(2.08, 0.62, 1.38), bodyPaint);
+  frontHood.position.set(0, 0.61, 1.41);
+  frontHood.castShadow = true;
+  frontHood.receiveShadow = true;
+  frontHood.name = 'chassisMesh';
 
-  // Front Grille & Chrome Bumper
+  const rearBody = new THREE.Mesh(new THREE.BoxGeometry(2.08, 0.66, 1.28), bodyPaint);
+  rearBody.position.set(0, 0.63, -1.46);
+  rearBody.castShadow = true;
+  rearBody.receiveShadow = true;
+
+  const cabinFloor = new THREE.Mesh(new THREE.BoxGeometry(1.94, 0.1, 1.65), floorMat);
+  cabinFloor.position.set(0, 0.33, -0.05);
+  cabinFloor.receiveShadow = true;
+
+  [-0.98, 0.98].forEach((sx) => {
+    const sill = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.22, 1.64), bodyPaint);
+    sill.position.set(sx, 0.41, -0.05);
+    sill.castShadow = true;
+    carBody.add(sill);
+  });
+
+  const centerConsole = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.24, 1.3), interiorMat);
+  centerConsole.position.set(0, 0.48, 0.05);
+
+  const dashboard = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.28, 0.36), interiorMat);
+  dashboard.position.set(0, 0.84, 0.72);
+  carBody.add(frontHood, rearBody, cabinFloor, centerConsole, dashboard);
+
+  // Front Grille & Chrome Bumpers
   const grille = new THREE.Mesh(
     new THREE.BoxGeometry(1.5, 0.32, 0.08),
     new THREE.MeshStandardMaterial({ color: 0x09090b, roughness: 0.4 })
@@ -2423,123 +2632,146 @@ export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.G
   frontBumper.position.set(0, 0.36, 2.14);
   const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(2.15, 0.18, 0.22), chromeMat);
   rearBumper.position.set(0, 0.36, -2.14);
-  car.add(grille, frontBumper, rearBumper);
+  carBody.add(grille, frontBumper, rearBumper);
 
-  // 2. Interior Seats & Steering Wheel
-  const driverSeat = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.6, 0.55), interiorMat);
-  driverSeat.position.set(-0.45, 0.85, 0.1);
-  const passengerSeat = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.6, 0.55), interiorMat);
-  passengerSeat.position.set(0.45, 0.85, 0.1);
-  const steeringWheel = new THREE.Mesh(
-    new THREE.TorusGeometry(0.14, 0.022, 8, 16),
-    new THREE.MeshStandardMaterial({ color: 0x09090b })
-  );
-  steeringWheel.position.set(-0.45, 1.05, 0.52);
-  steeringWheel.rotation.x = -Math.PI / 3;
-  car.add(driverSeat, passengerSeat, steeringWheel);
-
-  // 3. Hollow Cabin with Pillars, Windshields & Open Passenger Doorway
-  // Front Windshield (Angled forward glass)
-  const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.62, 0.06), darkGlass);
-  windshield.position.set(0, 1.22, 0.88);
-  windshield.rotation.x = -0.32;
-  car.add(windshield);
-
-  // Rear Windshield (Angled backward glass)
-  const rearWindow = new THREE.Mesh(new THREE.BoxGeometry(1.76, 0.58, 0.06), darkGlass);
-  rearWindow.position.set(0, 1.24, -1.28);
-  rearWindow.rotation.x = 0.35;
-  car.add(rearWindow);
-
-  // Left Driver-Side Windows (Solid glass on driver side)
-  const driverSideGlass = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.44, 2.1), darkGlass);
-  driverSideGlass.position.set(-0.92, 1.2, -0.2);
-  car.add(driverSideGlass);
-
-  // Right Passenger-Side Rear Quarter Window (Behind the open door area)
-  const passengerQuarterGlass = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.44, 0.7), darkGlass);
-  passengerQuarterGlass.position.set(0.92, 1.2, -0.9);
-  car.add(passengerQuarterGlass);
-
-  // Roof Pillars (A-Pillars & C-Pillars)
-  const pillarMat = bodyPaint;
-  [-0.92, 0.92].forEach((px) => {
-    const aPillar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.65, 0.08), pillarMat);
-    aPillar.position.set(px, 1.22, 0.88);
-    aPillar.rotation.x = -0.32;
-
-    const cPillar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.65, 0.12), pillarMat);
-    cPillar.position.set(px, 1.22, -1.28);
-    cPillar.rotation.x = 0.35;
-    car.add(aPillar, cPillar);
+  // 2. Sculpted Interior Seats & Steerable Wheel
+  [-0.46, 0.46].forEach((sx) => {
+    const cushion = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.14, 0.54), seatTrimMat);
+    cushion.position.set(sx, 0.44, 0.02);
+    const backrest = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.14), interiorMat);
+    backrest.position.set(sx, 0.78, -0.24);
+    backrest.rotation.x = -0.14;
+    const headrest = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.12), seatTrimMat);
+    headrest.position.set(sx, 1.15, -0.30);
+    carBody.add(cushion, backrest, headrest);
   });
 
-  // Roof
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.08, 2.3), bodyPaint);
-  roof.position.set(0, 1.52, -0.2);
-  roof.castShadow = true;
-  car.add(roof);
+  const steeringColumn = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.032, 0.036, 0.32, 10),
+    interiorMat
+  );
+  steeringColumn.position.set(-0.46, 0.88, 0.62);
+  steeringColumn.rotation.x = Math.PI / 3;
+  carBody.add(steeringColumn);
 
-  // 4. Articulated Opening Passenger Door (Right side at x = 1.05)
-  // The door group has its hinge at the forward edge (z = +0.65) so it swings outward realistically
+  const steeringWheelGroup = new THREE.Group();
+  steeringWheelGroup.name = 'steeringWheel';
+  steeringWheelGroup.position.set(-0.46, 0.96, 0.50);
+  steeringWheelGroup.rotation.x = -Math.PI / 3;
+
+  const wheelRim = new THREE.Mesh(
+    new THREE.TorusGeometry(0.15, 0.024, 10, 20),
+    new THREE.MeshStandardMaterial({ color: 0x09090b, roughness: 0.4 })
+  );
+  const wheelSpoke = new THREE.Mesh(
+    new THREE.BoxGeometry(0.28, 0.03, 0.02),
+    chromeMat
+  );
+  steeringWheelGroup.add(wheelRim, wheelSpoke);
+  carBody.add(steeringWheelGroup);
+
+  // 3. Hollow Cabin with Clearer Glass, Pillars & Raised Roof Headroom (y = 1.62)
+  const windshield = new THREE.Mesh(new THREE.BoxGeometry(1.78, 0.68, 0.05), cabinGlass);
+  windshield.position.set(0, 1.26, 0.88);
+  windshield.rotation.x = -0.34;
+  carBody.add(windshield);
+
+  const rearWindow = new THREE.Mesh(new THREE.BoxGeometry(1.76, 0.64, 0.05), cabinGlass);
+  rearWindow.position.set(0, 1.28, -1.28);
+  rearWindow.rotation.x = 0.36;
+  carBody.add(rearWindow);
+
+  // Rear Quarter Side Windows (Behind front doors)
+  [-0.96, 0.96].forEach((qx) => {
+    const qGlass = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.50, 0.62), cabinGlass);
+    qGlass.position.set(qx, 1.26, -0.92);
+    carBody.add(qGlass);
+  });
+
+  // Roof Pillars (A-Pillars, B-Pillars & C-Pillars)
+  [-0.94, 0.94].forEach((px) => {
+    const aPillar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 0.08), bodyPaint);
+    aPillar.position.set(px, 1.26, 0.88);
+    aPillar.rotation.x = -0.34;
+
+    const bPillar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 0.10), bodyPaint);
+    bPillar.position.set(px, 1.24, -0.62);
+
+    const cPillar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.70, 0.14), bodyPaint);
+    cPillar.position.set(px, 1.28, -1.28);
+    cPillar.rotation.x = 0.36;
+    carBody.add(aPillar, bPillar, cPillar);
+  });
+
+  // Roof (y = 1.62 gives generous headroom above seated driver)
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(1.86, 0.08, 2.26), bodyPaint);
+  roof.position.set(0, 1.62, -0.2);
+  roof.castShadow = true;
+  carBody.add(roof);
+
+  // 4. Articulated Opening Passenger Door (Right side at x = +1.05, hinged at front z = +0.58)
   const passengerDoorHinge = new THREE.Group();
   passengerDoorHinge.name = 'passengerDoor';
-  passengerDoorHinge.position.set(1.05, 0.9, 0.5); // Hinge pivot point
+  passengerDoorHinge.position.set(1.05, 0.84, 0.58);
 
-  const doorPanel = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 1.2), bodyPaint);
-  doorPanel.position.set(0, -0.05, -0.6); // Centered relative to hinge
-  const doorWindow = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 1.0), darkGlass);
-  doorWindow.position.set(0, 0.28, -0.6);
+  const doorPanel = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.62, 1.18), bodyPaint);
+  doorPanel.position.set(0, -0.02, -0.59);
+  const doorWindow = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.46, 1.04), cabinGlass);
+  doorWindow.position.set(0, 0.44, -0.59);
+  const doorFrameTop = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 1.12), bodyPaint);
+  doorFrameTop.position.set(0, 0.69, -0.59);
   const doorHandle = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.04, 0.18), chromeMat);
-  doorHandle.position.set(0.05, -0.02, -1.05); // Rear edge of door
-  passengerDoorHinge.add(doorPanel, doorWindow, doorHandle);
-  car.add(passengerDoorHinge);
+  doorHandle.position.set(0.05, 0.08, -1.04);
+  passengerDoorHinge.add(doorPanel, doorWindow, doorFrameTop, doorHandle);
+  carBody.add(passengerDoorHinge);
 
-  // Driver Door (Left side at x = -1.05)
+  // Driver Door (Left side at x = -1.05, hinged at front z = +0.58)
   const driverDoorHinge = new THREE.Group();
   driverDoorHinge.name = 'driverDoor';
-  driverDoorHinge.position.set(-1.05, 0.9, 0.5);
+  driverDoorHinge.position.set(-1.05, 0.84, 0.58);
 
-  const driverPanel = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 1.2), bodyPaint);
-  driverPanel.position.set(0, -0.05, -0.6);
-  const driverWindow = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 1.0), darkGlass);
-  driverWindow.position.set(0, 0.28, -0.6);
+  const driverPanel = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.62, 1.18), bodyPaint);
+  driverPanel.position.set(0, -0.02, -0.59);
+  const driverWindow = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.46, 1.04), cabinGlass);
+  driverWindow.position.set(0, 0.44, -0.59);
+  const driverFrameTop = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, 1.12), bodyPaint);
+  driverFrameTop.position.set(0, 0.69, -0.59);
   const driverHandle = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.04, 0.18), chromeMat);
-  driverHandle.position.set(-0.05, -0.02, -1.05);
-  driverDoorHinge.add(driverPanel, driverWindow, driverHandle);
-  car.add(driverDoorHinge);
+  driverHandle.position.set(-0.05, 0.08, -1.04);
+  driverDoorHinge.add(driverPanel, driverWindow, driverFrameTop, driverHandle);
+  carBody.add(driverDoorHinge);
 
   // Side Mirrors
   const mirrorL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.12), bodyPaint);
-  mirrorL.position.set(-1.12, 1.15, 0.65);
+  mirrorL.position.set(-1.12, 1.16, 0.66);
   const mirrorR = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.12), bodyPaint);
-  mirrorR.position.set(1.12, 1.15, 0.65);
-  car.add(mirrorL, mirrorR);
+  mirrorR.position.set(1.12, 1.16, 0.66);
+  carBody.add(mirrorL, mirrorR);
 
-  // 5. Roof Luggage Rack & Suitcases
+  // 5. Roof Luggage Rack & Suitcases (elevated to match y = 1.62 roof)
   const rackBars = [
-    [-0.75, 1.58, -0.2],
-    [0.75, 1.58, -0.2],
+    [-0.75, 1.68, -0.2],
+    [0.75, 1.68, -0.2],
   ];
   rackBars.forEach(([rx, ry, rz]) => {
     const bar = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 2.0), chromeMat);
     bar.position.set(rx, ry, rz);
-    car.add(bar);
+    carBody.add(bar);
   });
 
   const suitcase1 = new THREE.Mesh(
     new THREE.BoxGeometry(0.7, 0.35, 1.1),
     new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.6 })
   );
-  suitcase1.position.set(-0.25, 1.76, -0.2);
+  suitcase1.position.set(-0.25, 1.86, -0.2);
   const suitcase2 = new THREE.Mesh(
     new THREE.BoxGeometry(0.65, 0.28, 0.9),
     new THREE.MeshStandardMaterial({ color: 0x059669, roughness: 0.6 })
   );
-  suitcase2.position.set(0.35, 1.72, -0.15);
-  car.add(suitcase1, suitcase2);
+  suitcase2.position.set(0.35, 1.82, -0.15);
+  carBody.add(suitcase1, suitcase2);
 
-  // 6. Articulated Wheels with Steering & Spinning Pivots
+  // 6. Articulated Wheels with Steering & Spinning Pivots (mounted to car root so tires stay grounded)
   const wheelSetup = [
     { name: 'frontWheelLeft', x: -1.05, y: 0.38, z: 1.3, isFront: true },
     { name: 'frontWheelRight', x: 1.05, y: 0.38, z: 1.3, isFront: true },
@@ -2572,7 +2804,7 @@ export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.G
     const hl = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.2, 0.1), headlightMat);
     hl.position.set(hx, 0.65, 2.12);
     hl.name = 'headlight';
-    car.add(hl);
+    carBody.add(hl);
   });
 
   // 8. Taillights & Bright Brake Lights
@@ -2580,7 +2812,7 @@ export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.G
     const tl = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.2, 0.1), taillightMat);
     tl.position.set(tx, 0.65, -2.12);
     tl.name = 'taillight';
-    car.add(tl);
+    carBody.add(tl);
   });
 
   // Dual Chrome Exhaust Pipes
@@ -2589,7 +2821,7 @@ export function buildRoadTripCar(bodyColor: number | string = 0x2563eb): THREE.G
     pipe.rotation.x = Math.PI / 2;
     pipe.position.set(ex, 0.3, -2.2);
     pipe.name = 'exhaustPipe';
-    car.add(pipe);
+    carBody.add(pipe);
   });
 
   return car;

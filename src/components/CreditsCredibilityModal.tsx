@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as THREE from 'three';
 import {
   X,
   ChevronLeft,
@@ -6,23 +7,13 @@ import {
   Trophy,
   Play,
   Pause,
-  Crown,
   Sparkles,
   ArrowDown,
-  Award,
   Flame,
 } from 'lucide-react';
 import { CHARACTERS, CharacterDef } from '../utils/characters';
+import { buildCharacterMesh } from '../utils/characterModelBuilder';
 import { soundFX } from '../services/soundEffects';
-
-import diveSaveImg from '../assets/images/foursquare_dive_save_1793935467586.jpg';
-import trophyImg from '../assets/images/foursquare_trophy_celebration_1793935469726.jpg';
-import pointCelebImg from '../assets/images/foursquare_point_celebration_1793935468632.jpg';
-import aerialSlamImg from '../assets/images/foursquare_aerial_slam_1793935468740.jpg';
-import streetActionImg from '../assets/images/foursquare_street_action_1790205795362.jpg';
-import finalsArenaImg from '../assets/images/foursquare_finals_arena_1790205818716.jpg';
-import rooftopImg from '../assets/images/foursquare_rooftop_urban_1790205828882.jpg';
-import goldenLegendImg from '../assets/images/golden_legend_1790126756080.jpg';
 
 interface CreditsCredibilityModalProps {
   isOpen: boolean;
@@ -37,65 +28,9 @@ export interface CreditEntry {
   character: CharacterDef;
   highlight: string;
   notes: string;
-  gameplayAction: string;
-  gameplaySnapshot: string;
-  actionTag: string;
-  venueName: string;
 }
 
-// 8 Distinct Authentic Gameplay Instances (diving for the ball, celebrating points, celebrating trophy, aerial slam)
-const SNAPSHOT_ROTATION = [
-  {
-    image: diveSaveImg,
-    action: 'Diving Boundary Chalk Save',
-    tag: 'DIVE SAVE',
-    venue: 'Oakridge Schoolyard Court 4',
-  },
-  {
-    image: trophyImg,
-    action: 'World Championship Trophy Celebration',
-    tag: 'TROPHY CELEBRATION',
-    venue: 'World Grand Finals Arena Podiums',
-  },
-  {
-    image: pointCelebImg,
-    action: 'King Ouster Point Celebration',
-    tag: 'POINT CELEBRATION',
-    venue: 'Asphalt Blacktop Stadium',
-  },
-  {
-    image: aerialSlamImg,
-    action: 'Mid-Air Topspin Spike Smash',
-    tag: 'AERIAL SLAM',
-    venue: 'Varsity Courtyard Quad 1',
-  },
-  {
-    image: streetActionImg,
-    action: 'Side-Line Cross Court Save',
-    tag: 'STREET SAVE',
-    venue: 'Sunset Park Asphalt League',
-  },
-  {
-    image: finalsArenaImg,
-    action: 'Stadium Crowd Championship Matchpoint',
-    tag: 'CHAMPIONSHIP POINT',
-    venue: 'Metropolis Indoor Arena',
-  },
-  {
-    image: rooftopImg,
-    action: 'Rooftop Edge Diving Recover',
-    tag: 'EDGE RECOVERY',
-    venue: 'Downtown Skydeck Court',
-  },
-  {
-    image: goldenLegendImg,
-    action: 'Golden King Victory Stand',
-    tag: 'VICTORY HOLD',
-    venue: 'Federation Hall of Fame Courtyard',
-  },
-];
-
-// Map 16 Characters to official Credits & Credibility roles and still gameplay snapshots
+// Map 16 Characters to official Credits & Credibility roles
 export const CREDITS_DATA: CreditEntry[] = CHARACTERS.map((char, index) => {
   const roles = [
     'Lead Game Designer & Founder',
@@ -116,8 +51,6 @@ export const CREDITS_DATA: CreditEntry[] = CHARACTERS.map((char, index) => {
     'Executive Producer & Federation King',
   ];
 
-  const snap = SNAPSHOT_ROTATION[index % SNAPSHOT_ROTATION.length];
-
   return {
     id: index + 1,
     role: roles[index % roles.length],
@@ -126,12 +59,354 @@ export const CREDITS_DATA: CreditEntry[] = CHARACTERS.map((char, index) => {
     character: char,
     highlight: `${char.speciesType} • ${char.title}`,
     notes: char.description,
-    gameplayAction: snap.action,
-    gameplaySnapshot: snap.image,
-    actionTag: snap.tag,
-    venueName: snap.venue,
   };
 });
+
+// 6 Distinct Still Action Shot Moments for Four Square Legends
+export interface StillActionShotDef {
+  actionName: string;
+  tag: string;
+  venueName: string;
+  pose: 'spike_smash' | 'dive_save' | 'side_dig' | 'power_slam' | 'corner_scoop' | 'crown_hold';
+  ballPos: [number, number, number];
+  charRotY: number;
+  cameraPos: [number, number, number];
+  cameraLookAt: [number, number, number];
+}
+
+const ACTION_SHOTS: StillActionShotDef[] = [
+  {
+    actionName: 'Mid-Air Topspin Spike Smash',
+    tag: 'AERIAL SMASH',
+    venueName: 'Oakridge Schoolyard Court 4',
+    pose: 'spike_smash',
+    ballPos: [0.38, 1.48, 0.42],
+    charRotY: -0.38,
+    cameraPos: [1.35, 1.25, 3.1],
+    cameraLookAt: [0, 0.95, 0],
+  },
+  {
+    actionName: 'Diving Boundary Chalk Save',
+    tag: 'DIVE SAVE',
+    venueName: 'Varsity Courtyard Quad 1',
+    pose: 'dive_save',
+    ballPos: [0.18, 0.38, 0.62],
+    charRotY: 0.32,
+    cameraPos: [1.6, 0.85, 2.9],
+    cameraLookAt: [0, 0.65, 0],
+  },
+  {
+    actionName: 'Sideline Cross-Court Dig Save',
+    tag: 'SIDELINE DIG',
+    venueName: 'Lincoln High Gymnasium',
+    pose: 'side_dig',
+    ballPos: [0.42, 0.65, 0.38],
+    charRotY: -0.42,
+    cameraPos: [1.45, 1.1, 3.0],
+    cameraLookAt: [0, 0.88, 0],
+  },
+  {
+    actionName: 'Volcanic Power Slam Volley',
+    tag: 'POWER SLAM',
+    venueName: 'Asphalt Blacktop Stadium',
+    pose: 'power_slam',
+    ballPos: [0.05, 1.68, 0.32],
+    charRotY: -0.15,
+    cameraPos: [0.3, 0.95, 3.0],
+    cameraLookAt: [0, 1.05, 0],
+  },
+  {
+    actionName: 'Low Corner Spin Scoop',
+    tag: 'CORNER SCOOP',
+    venueName: 'Downtown Skydeck Court',
+    pose: 'corner_scoop',
+    ballPos: [0.32, 0.45, 0.48],
+    charRotY: 0.28,
+    cameraPos: [1.5, 0.95, 3.1],
+    cameraLookAt: [0, 0.75, 0],
+  },
+  {
+    actionName: 'Sovereign King Victory Stance',
+    tag: 'CROWN HOLD',
+    venueName: 'World Grand Finals Arena',
+    pose: 'crown_hold',
+    ballPos: [0.32, 0.22, 0.32],
+    charRotY: -0.28,
+    cameraPos: [1.2, 1.2, 3.2],
+    cameraLookAt: [0, 0.95, 0],
+  },
+];
+
+// Helper to pose 3D character mesh into athletic freeze-frame action stance
+function applyStillActionPose(mesh: THREE.Group, poseType: string) {
+  const rightArm = mesh.getObjectByName('rightArm') as THREE.Group | undefined;
+  const leftArm = mesh.getObjectByName('leftArm') as THREE.Group | undefined;
+  const torso = mesh.getObjectByName('torsoMesh') as THREE.Mesh | undefined;
+  const head = mesh.getObjectByName('headMesh') as THREE.Mesh | undefined;
+  const leftLeg = mesh.getObjectByName('leftLeg') as THREE.Group | undefined;
+  const rightLeg = mesh.getObjectByName('rightLeg') as THREE.Group | undefined;
+
+  switch (poseType) {
+    case 'spike_smash':
+      // Mid-Air Topspin Spike: right arm raised high angled forward-downward, left arm back for balance
+      if (rightArm) rightArm.rotation.set(-1.85, 0.2, -0.3);
+      if (leftArm) leftArm.rotation.set(0.65, -0.2, 0.45);
+      if (torso) torso.rotation.set(0.28, 0.15, 0);
+      if (leftLeg) leftLeg.rotation.set(-0.35, 0, 0);
+      if (rightLeg) rightLeg.rotation.set(0.45, 0, 0);
+      mesh.position.y = 0.22;
+      break;
+
+    case 'dive_save':
+      // Low Diving Save: body pitched forward toward court floor, arms reaching forward
+      if (rightArm) rightArm.rotation.set(-1.3, 0.3, -0.2);
+      if (leftArm) leftArm.rotation.set(-1.25, -0.2, 0.2);
+      if (torso) torso.rotation.set(0.55, 0, 0);
+      if (leftLeg) leftLeg.rotation.set(0.65, 0, 0);
+      if (rightLeg) rightLeg.rotation.set(0.5, 0, 0);
+      mesh.position.y = -0.12;
+      break;
+
+    case 'side_dig':
+      // Sideline Dig: deep lunge, right arm scooping up from hip
+      if (rightArm) rightArm.rotation.set(-0.65, 0.4, -0.35);
+      if (leftArm) leftArm.rotation.set(-0.2, -0.3, 0.4);
+      if (torso) torso.rotation.set(0.18, 0.25, 0);
+      if (leftLeg) leftLeg.rotation.set(-0.55, 0, -0.2);
+      if (rightLeg) rightLeg.rotation.set(0.45, 0, 0.2);
+      mesh.position.y = -0.06;
+      break;
+
+    case 'power_slam':
+      // Two-handed overhead power slam
+      if (rightArm) rightArm.rotation.set(-1.75, 0.1, -0.25);
+      if (leftArm) leftArm.rotation.set(-1.75, -0.1, 0.25);
+      if (torso) torso.rotation.set(0.15, 0, 0);
+      if (leftLeg) leftLeg.rotation.set(-0.25, 0, 0);
+      if (rightLeg) rightLeg.rotation.set(0.25, 0, 0);
+      mesh.position.y = 0.15;
+      break;
+
+    case 'corner_scoop':
+      // Low corner scoop save
+      if (rightArm) rightArm.rotation.set(-0.95, 0.3, -0.3);
+      if (leftArm) leftArm.rotation.set(0.3, -0.2, 0.4);
+      if (torso) torso.rotation.set(0.35, 0.2, 0);
+      if (leftLeg) leftLeg.rotation.set(-0.4, 0, 0);
+      if (rightLeg) rightLeg.rotation.set(0.55, 0, 0);
+      mesh.position.y = -0.05;
+      break;
+
+    case 'crown_hold':
+    default:
+      // Triumphant King Hold stance
+      if (rightArm) rightArm.rotation.set(-1.55, 0.1, -0.3);
+      if (leftArm) leftArm.rotation.set(-0.25, -0.2, 0.35);
+      if (torso) torso.rotation.set(-0.08, 0, 0);
+      if (head) head.rotation.set(-0.15, 0, 0);
+      mesh.position.y = 0;
+      break;
+  }
+}
+
+// Still 3D Gameplay Action Shot Viewer (Zero rotation, freeze-framed in athletic action moment)
+const CreditCharacterViewer: React.FC<{ character: CharacterDef; actionShot: StillActionShotDef }> = ({
+  character,
+  actionShot,
+}) => {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!mountRef.current) return;
+    const container = mountRef.current;
+    const width = container.clientWidth || 600;
+    const height = container.clientHeight || 800;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x070d18);
+
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 50);
+    camera.position.set(...actionShot.cameraPos);
+    camera.lookAt(...actionShot.cameraLookAt);
+
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+    } catch {
+      renderer = new THREE.WebGLRenderer({ antialias: false });
+    }
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.shadowMap.enabled = true;
+
+    container.innerHTML = '';
+    container.appendChild(renderer.domElement);
+
+    // Studio Lights
+    const hemiLight = new THREE.HemisphereLight(0xfffbe8, 0x0f172a, 1.35);
+    scene.add(hemiLight);
+
+    const keyLight = new THREE.DirectionalLight(0x38bdf8, 2.4);
+    keyLight.position.set(3.5, 5, 4);
+    keyLight.castShadow = true;
+    scene.add(keyLight);
+
+    const warmFill = new THREE.DirectionalLight(0xf59e0b, 1.5);
+    warmFill.position.set(-3.5, 2.5, 2.5);
+    scene.add(warmFill);
+
+    // Court Pedestal with Asphalt Texture
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.35, 1.45, 0.22, 32),
+      new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.4, metalness: 0.6 })
+    );
+    pedestal.position.y = -0.11;
+    pedestal.receiveShadow = true;
+    scene.add(pedestal);
+
+    // Chalk Boundary Lines on Court Surface
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 });
+    const lineH = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 0.05).rotateX(-Math.PI / 2), lineMat);
+    lineH.position.y = 0.012;
+    const lineV = new THREE.Mesh(new THREE.PlaneGeometry(0.05, 2.5).rotateX(-Math.PI / 2), lineMat);
+    lineV.position.y = 0.012;
+    scene.add(lineH, lineV);
+
+    // Cyan High-Tech Line Ring
+    const cyanRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.36, 0.035, 16, 32).rotateX(Math.PI / 2),
+      new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        metalness: 0.9,
+        roughness: 0.1,
+        emissive: 0x0284c7,
+        emissiveIntensity: 0.4,
+      })
+    );
+    cyanRing.position.y = 0.01;
+    scene.add(cyanRing);
+
+    // Build the character's exact 3D in-game model
+    const mesh = buildCharacterMesh(character);
+    // Apply athletic freeze-frame action pose
+    applyStillActionPose(mesh, actionShot.pose);
+    // STATIC HEROIC ROTATION ANGLE: ZERO CONTINUOUS ROTATION!
+    mesh.rotation.y = actionShot.charRotY;
+    scene.add(mesh);
+
+    // Freeze-Framed Official Red Four Square Ball mid-flight/mid-impact
+    const ballGeo = new THREE.SphereGeometry(0.22, 24, 24);
+    const ballMat = new THREE.MeshStandardMaterial({
+      color: 0xef4444,
+      roughness: 0.35,
+      metalness: 0.05,
+    });
+    const ballMesh = new THREE.Mesh(ballGeo, ballMat);
+    ballMesh.position.set(...actionShot.ballPos);
+    scene.add(ballMesh);
+
+    // Ball contact shadow on court floor
+    const ballShadowGeo = new THREE.CircleGeometry(0.22, 24);
+    ballShadowGeo.rotateX(-Math.PI / 2);
+    const ballShadowMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: Math.max(0.2, 0.65 - actionShot.ballPos[1] * 0.25),
+    });
+    const ballShadow = new THREE.Mesh(ballShadowGeo, ballShadowMat);
+    ballShadow.position.set(actionShot.ballPos[0], 0.015, actionShot.ballPos[2]);
+    scene.add(ballShadow);
+
+    // SINGLE RENDER CALL: NO ROTATION LOOP!
+    renderer.render(scene, camera);
+
+    const handleResize = () => {
+      if (!container || !renderer) return;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      renderer.render(scene, camera);
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      renderer.dispose();
+      if (container && renderer.domElement) {
+        container.innerHTML = '';
+      }
+    };
+  }, [character, actionShot]);
+
+  return (
+    <div className="w-full h-full relative bg-slate-950 flex flex-col justify-between overflow-hidden">
+      {/* 3D WebGL Canvas */}
+      <div ref={mountRef} className="absolute inset-0 w-full h-full" />
+
+      {/* Top Overlay Banner */}
+      <div className="relative z-20 p-6 bg-gradient-to-b from-slate-950/90 via-slate-950/50 to-transparent flex items-center justify-between pointer-events-none">
+        <div className="flex items-center gap-2">
+          <span className="px-3 py-1 rounded-lg bg-sky-500 text-slate-950 text-xs font-black uppercase font-mono tracking-wider shadow">
+            {actionShot.tag}
+          </span>
+          <span className="text-xs sm:text-sm font-mono font-bold text-sky-300 tracking-wide drop-shadow">
+            {actionShot.venueName}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5 text-xs font-mono text-amber-300 bg-slate-900/80 px-3 py-1 rounded-lg border border-amber-500/40 backdrop-blur-md">
+          <Flame className="w-3.5 h-3.5 text-amber-400" />
+          <span>STILL ACTION SHOT</span>
+        </div>
+      </div>
+
+      {/* Bottom Overlay Info Banner */}
+      <div className="relative z-20 p-6 sm:p-8 bg-gradient-to-t from-slate-950 via-slate-950/85 to-transparent flex items-end justify-between pointer-events-none">
+        <div className="space-y-1">
+          <div className="text-xs font-mono font-bold text-sky-400 uppercase tracking-widest flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-sky-400" />
+            <span>STILL ACTION MOMENT • {actionShot.actionName}</span>
+          </div>
+          <div className="text-2xl sm:text-4xl font-black text-white uppercase tracking-wide drop-shadow-[0_2px_10px_rgba(0,0,0,0.9)]">
+            {character.name}
+          </div>
+          <div className="text-xs sm:text-sm text-slate-300 font-sans pt-0.5 max-w-md italic">
+            "{character.quote}"
+          </div>
+
+          {/* Character Stat Badges */}
+          <div className="flex flex-wrap items-center gap-2 pt-3 font-mono text-[11px]">
+            <span className="px-2.5 py-1 rounded-md bg-slate-900/90 border border-slate-700 text-amber-400 font-bold">
+              SPEED {character.speed}/10
+            </span>
+            <span className="px-2.5 py-1 rounded-md bg-slate-900/90 border border-slate-700 text-rose-400 font-bold">
+              POWER {character.power}/10
+            </span>
+            <span className="px-2.5 py-1 rounded-md bg-slate-900/90 border border-slate-700 text-emerald-400 font-bold">
+              SPIN {character.spin}/10
+            </span>
+            <span className="px-2.5 py-1 rounded-md bg-slate-900/90 border border-slate-700 text-cyan-400 font-bold">
+              CAREER KOS {character.careerEliminations}
+            </span>
+          </div>
+        </div>
+
+        {/* Character Avatar Icon Badge */}
+        <div
+          className="w-16 h-16 rounded-2xl border-2 border-sky-400/60 flex items-center justify-center font-black text-2xl shadow-2xl shrink-0 backdrop-blur-md"
+          style={{
+            backgroundColor: character.colors.primary,
+            color: character.colors.secondary,
+          }}
+        >
+          {character.name.charAt(0)}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export const CreditsCredibilityModal: React.FC<CreditsCredibilityModalProps> = ({
   isOpen,
@@ -142,6 +417,7 @@ export const CreditsCredibilityModal: React.FC<CreditsCredibilityModalProps> = (
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const activeCredit = CREDITS_DATA[currentIndex] || CREDITS_DATA[0];
+  const activeActionShot = ACTION_SHOTS[currentIndex % ACTION_SHOTS.length];
 
   // Auto-scroll downward smoothly
   useEffect(() => {
@@ -253,7 +529,7 @@ export const CreditsCredibilityModal: React.FC<CreditsCredibilityModalProps> = (
         </button>
       </div>
 
-      {/* Main Screen Layout: Left Auto-Scrolling Credits Text + Right Real Still Gameplay Snapshot */}
+      {/* Main Screen Layout: Left Auto-Scrolling Credits Text + Right Real 3D Gameplay Character Viewer */}
       <div className="flex-1 flex flex-col md:flex-row h-[calc(100vh-4rem)] overflow-hidden">
         {/* LEFT SIDE: Auto-Scrolling Downward Clean Credits Text */}
         <div
@@ -336,74 +612,9 @@ export const CreditsCredibilityModal: React.FC<CreditsCredibilityModalProps> = (
           </div>
         </div>
 
-        {/* RIGHT SIDE: Pure Still Image of Gameplay Instance (No Orbiting, No Rotation, No Pose Changes) */}
-        <div className="w-full md:w-1/2 h-full relative bg-slate-950 border-t md:border-t-0 md:border-l border-slate-900 flex flex-col justify-center items-center p-6 sm:p-10 overflow-hidden">
-          {/* Ambient Glow Backdrop */}
-          <div className="absolute inset-0 bg-radial from-sky-950/20 via-slate-950 to-black pointer-events-none" />
-
-          {/* Featured Still Gameplay Snapshot Frame */}
-          <div className="relative z-10 w-full max-w-xl aspect-4/3 rounded-2xl overflow-hidden border-2 border-sky-500/40 shadow-[0_0_50px_rgba(56,189,248,0.25)] bg-slate-900 flex flex-col group">
-            {/* Top Snapshot Overlay Bar */}
-            <div className="absolute top-0 inset-x-0 p-4 bg-linear-to-b from-black/80 via-black/40 to-transparent z-20 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 rounded-md bg-sky-500 text-slate-950 text-[10px] font-black uppercase font-mono tracking-wider shadow">
-                  {activeCredit.actionTag}
-                </span>
-                <span className="text-xs font-mono font-bold text-white tracking-wide drop-shadow">
-                  {activeCredit.venueName}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5 text-[11px] font-mono text-sky-300 bg-slate-900/70 px-2.5 py-1 rounded-md border border-sky-500/30">
-                <Flame className="w-3.5 h-3.5 text-amber-400" />
-                <span>MATCH STILL SNAPSHOT</span>
-              </div>
-            </div>
-
-            {/* Pure Still Image Element (Non-Rotating, Non-Orbiting) */}
-            <img
-              key={activeCredit.gameplaySnapshot}
-              src={activeCredit.gameplaySnapshot}
-              alt={activeCredit.gameplayAction}
-              className="w-full h-full object-cover transition-opacity duration-300"
-            />
-
-            {/* Bottom Caption Overlay */}
-            <div className="absolute bottom-0 inset-x-0 p-5 bg-linear-to-t from-black/90 via-black/60 to-transparent z-20 flex items-end justify-between">
-              <div>
-                <div className="text-xs font-mono font-bold text-sky-400 uppercase tracking-widest">
-                  GAMEPLAY MOMENT
-                </div>
-                <div className="text-lg sm:text-xl font-black text-white uppercase tracking-wide">
-                  {activeCredit.gameplayAction}
-                </div>
-                <div className="text-xs text-slate-300 font-sans mt-0.5">
-                  Featuring <span className="font-bold text-white">{activeCredit.name}</span> in live match play
-                </div>
-              </div>
-
-              {/* Character Avatar Badge */}
-              <div
-                className="w-12 h-12 rounded-xl border border-sky-400/50 flex items-center justify-center font-black text-base shadow-lg shrink-0"
-                style={{
-                  backgroundColor: activeCredit.character.colors.primary,
-                  color: activeCredit.character.colors.secondary,
-                }}
-              >
-                {activeCredit.character.name.charAt(0)}
-              </div>
-            </div>
-          </div>
-
-          {/* Bottom Card Information */}
-          <div className="relative z-10 mt-6 w-full max-w-xl flex items-center justify-between text-xs font-mono text-slate-400 px-2">
-            <span className="flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-sky-400" />
-              <span>STILL CAPTURE • {activeCredit.character.speciesType}</span>
-            </span>
-            <span className="text-sky-300 font-bold">
-              USE LEFT & RIGHT ARROWS TO NAVIGATE
-            </span>
-          </div>
+        {/* RIGHT SIDE: Real 3D In-Game Still Action Shot filling the ENTIRE right side of the screen */}
+        <div className="w-full md:w-1/2 h-full relative bg-slate-950 border-t md:border-t-0 md:border-l border-slate-900 flex flex-col justify-center items-center overflow-hidden">
+          <CreditCharacterViewer character={activeCredit.character} actionShot={activeActionShot} />
         </div>
       </div>
     </div>

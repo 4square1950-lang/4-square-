@@ -139,9 +139,9 @@ export class PhysicsEngine {
         }
       }
 
-      // Hard clamp inside schoolyard perimeter boundaries
+      // Hard clamp inside campus perimeter boundaries (front Maple St z=-47 to backyard fence z=+22)
       x = Math.max(-27.5, Math.min(27.5, x));
-      z = Math.max(-25.0, Math.min(23.5, z));
+      z = Math.max(-47.0, Math.min(22.0, z));
     }
 
     // Update position in cylinder registry

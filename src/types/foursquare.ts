@@ -41,6 +41,7 @@ export interface BallState {
   hasBouncedThisPlay: boolean;
   isLive: boolean;
   isServing: boolean;
+  hitCount?: number;
 }
 
 export type RefereeCallType = 

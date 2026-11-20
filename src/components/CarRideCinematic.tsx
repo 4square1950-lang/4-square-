@@ -18,6 +18,7 @@ import { VenueDef } from '../types/campaign';
 import {
   buildRoadTripCar,
   buildCharacterMesh,
+  applySeatedDriverPose,
 } from '../utils/characterModelBuilder';
 import { CHARACTERS, CharacterCustomization } from '../utils/characters';
 import { soundFX } from '../services/soundEffects';
@@ -164,6 +165,8 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     scene.add(playerCar);
 
     // Curbside door when car is facing forward (at model -X, world +X curbside)
+    const carBodyGroup = (playerCar.getObjectByName('carBodyGroup') as THREE.Group | undefined) || playerCar;
+    const steeringWheel = playerCar.getObjectByName('steeringWheel') as THREE.Group | undefined;
     const curbsideDoor = playerCar.getObjectByName('driverDoor') as THREE.Group | undefined;
     const frontWheelL = playerCar.getObjectByName('frontWheelLeft') as THREE.Group | undefined;
     const frontWheelR = playerCar.getObjectByName('frontWheelRight') as THREE.Group | undefined;
@@ -172,7 +175,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
 
     // Player Avatar Mesh (reflects customized creature/character model)
     const playerMesh = buildCharacterMesh(CHARACTERS[0], customization);
-    playerMesh.position.set(3.6, 0, 1.2);
+    playerMesh.position.set(4.25, 0, 1.95);
     playerMesh.visible = true;
     scene.add(playerMesh);
 
@@ -180,6 +183,9 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     const playerArmL = playerMesh.getObjectByName('leftArm') as THREE.Group | undefined;
     const playerLegR = playerMesh.getObjectByName('rightLeg') as THREE.Group | undefined;
     const playerLegL = playerMesh.getObjectByName('leftLeg') as THREE.Group | undefined;
+    const playerShinL = playerMesh.getObjectByName('leftShin') as THREE.Group | undefined;
+    const playerShinR = playerMesh.getObjectByName('rightShin') as THREE.Group | undefined;
+    let isDriverAttachedToCabin = false;
 
     // 4-Lane Asphalt Road
     const roadMat = new THREE.MeshStandardMaterial({
@@ -349,8 +355,37 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
 
       const tSec = currentDriveTimeRef.current;
 
+      const setSeatedWalkReset = () => {
+        if (playerShinL) playerShinL.rotation.x = 0;
+        if (playerShinR) playerShinR.rotation.x = 0;
+        applySeatedDriverPose(playerMesh, 0, 0);
+      };
+
+      const ensureDriverDetachedToWorld = (wx: number, wy: number, wz: number, wyRot: number) => {
+        if (isDriverAttachedToCabin) {
+          carBodyGroup.remove(playerMesh);
+          scene.add(playerMesh);
+          isDriverAttachedToCabin = false;
+        }
+        playerMesh.position.set(wx, wy, wz);
+        playerMesh.rotation.set(0, wyRot, 0);
+      };
+
+      const ensureDriverAttachedInCabin = (steer: number) => {
+        if (!isDriverAttachedToCabin) {
+          scene.remove(playerMesh);
+          carBodyGroup.add(playerMesh);
+          isDriverAttachedToCabin = true;
+        }
+        playerMesh.visible = true;
+        playerMesh.scale.setScalar(0.84);
+        playerMesh.position.set(-0.46, 0.17, 0.04);
+        playerMesh.rotation.set(0, 0, 0);
+        applySeatedDriverPose(playerMesh, 1.0, steer);
+      };
+
       // -------------------------------------------------------------
-      // PHASE 1: FAST BOARDING & DOOR MECHANICS (0s - 3.5s)
+      // PHASE 1: BOARDING & DOOR CLEARANCE (0s - 3.5s)
       // -------------------------------------------------------------
       if (tSec < 3.5) {
         setPhaseText('Boarding Vehicle...');
@@ -358,67 +393,100 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         trafficCars.forEach((tc) => (tc.mesh.visible = false));
         schoolArrivalGroup.visible = false;
         playerCar.position.set(2.0, 0, 0);
-        playerCar.rotation.set(0, Math.PI, 0); // Strict forward heading
+        playerCar.rotation.set(0, Math.PI, 0);
+        carBodyGroup.position.set(0, 0, 0);
+        carBodyGroup.rotation.set(0, 0, 0);
 
-        if (tSec < 1.2) {
-          // Walk from sidewalk at (3.6, 1.2) to curbside door at (3.1, -0.2)
-          const walkT = tSec / 1.2;
+        if (tSec < 1.05) {
+          // Walk along sidewalk outside door sweep radius (4.25, 1.95) -> (3.75, 0.65)
+          const walkT = tSec / 1.05;
+          ensureDriverDetachedToWorld(
+            THREE.MathUtils.lerp(4.25, 3.75, walkT),
+            Math.abs(Math.sin(tSec * 14)) * 0.04,
+            THREE.MathUtils.lerp(1.95, 0.65, walkT),
+            Math.atan2(3.75 - 4.25, 0.65 - 1.95)
+          );
           playerMesh.visible = true;
-          const startX = 3.6, endX = 3.1;
-          const startZ = 1.2, endZ = -0.2;
-          playerMesh.position.x = THREE.MathUtils.lerp(startX, endX, walkT);
-          playerMesh.position.z = THREE.MathUtils.lerp(startZ, endZ, walkT);
-          playerMesh.position.y = 0;
-          // Calculate heading to face movement direction!
-          playerMesh.rotation.y = Math.atan2(endX - startX, endZ - startZ);
+          playerMesh.scale.setScalar(1.0);
+          setSeatedWalkReset();
 
-          // Dynamic leg and arm stride swing
           const walkCycle = Math.sin(tSec * 14);
-          if (playerLegL) playerLegL.rotation.x = walkCycle * 0.55;
-          if (playerLegR) playerLegR.rotation.x = -walkCycle * 0.55;
-          if (playerArmL) playerArmL.rotation.x = -walkCycle * 0.45;
-          if (playerArmR) playerArmR.rotation.x = walkCycle * 0.45;
-
+          if (playerLegL) playerLegL.rotation.x = walkCycle * 0.52;
+          if (playerLegR) playerLegR.rotation.x = -walkCycle * 0.52;
+          if (playerArmL) playerArmL.rotation.x = -walkCycle * 0.42;
+          if (playerArmR) playerArmR.rotation.x = walkCycle * 0.42;
           if (curbsideDoor) curbsideDoor.rotation.y = 0;
-        } else if (tSec >= 1.2 && tSec < 2.2) {
-          // Unlatch & swing door wide open outward towards sidewalk
-          const openT = (tSec - 1.2) / 1.0;
+        } else if (tSec < 1.85) {
+          // Wait clear of door swing while curbside door swings wide open outward
+          const openT = (tSec - 1.05) / 0.8;
+          const easeOpen = Math.sin((openT * Math.PI) / 2);
           if (!playedDoorOpen) {
             soundFX.playCarDoorOpen();
             playedDoorOpen = true;
           }
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.22, openT);
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.25, easeOpen);
           }
-          // Turn to face car interior
-          playerMesh.rotation.y = THREE.MathUtils.lerp(Math.atan2(-0.5, -1.4), -Math.PI / 2, openT);
-          // Reset limbs
+          const approachYaw = Math.atan2(3.75 - 4.25, 0.65 - 1.95);
+          const doorYaw = Math.atan2(3.12 - 3.75, 0.12 - 0.65);
+          ensureDriverDetachedToWorld(
+            3.75,
+            0,
+            0.65,
+            THREE.MathUtils.lerp(approachYaw, doorYaw, easeOpen)
+          );
+          playerMesh.scale.setScalar(1.0);
+          setSeatedWalkReset();
           if (playerLegL) playerLegL.rotation.x = 0;
           if (playerLegR) playerLegR.rotation.x = 0;
           if (playerArmL) playerArmL.rotation.x = 0;
           if (playerArmR) playerArmR.rotation.x = 0;
-        } else if (tSec >= 2.2 && tSec < 3.0) {
-          // Step into driver seat
-          const stepT = (tSec - 2.2) / 0.8;
-          if (curbsideDoor) curbsideDoor.rotation.y = 1.22;
-          playerMesh.position.x = THREE.MathUtils.lerp(3.1, 1.55, stepT);
-          playerMesh.position.z = THREE.MathUtils.lerp(-0.2, 0.1, stepT);
-          playerMesh.position.y = THREE.MathUtils.lerp(0, -0.25, stepT);
-          playerMesh.rotation.y = -Math.PI / 2;
+        } else if (tSec < 2.95) {
+          // Crouch & step cleanly through open doorway sill (3.75, 0.65) -> (3.12, 0.12) -> driver seat (2.46, 0.17, -0.04)
+          const enterT = (tSec - 1.85) / 1.1;
+          if (curbsideDoor) curbsideDoor.rotation.y = 1.25;
+          playerMesh.visible = true;
+
+          if (enterT < 0.45) {
+            const subT = enterT / 0.45;
+            const ease = subT * subT * (3 - 2 * subT);
+            ensureDriverDetachedToWorld(
+              THREE.MathUtils.lerp(3.75, 3.12, ease),
+              THREE.MathUtils.lerp(0, 0.04, ease),
+              THREE.MathUtils.lerp(0.65, 0.12, ease),
+              THREE.MathUtils.lerp(-2.2, -Math.PI / 2, ease)
+            );
+            playerMesh.scale.setScalar(THREE.MathUtils.lerp(1.0, 0.86, ease));
+            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0, 0.48, ease), 0);
+          } else {
+            const subT = (enterT - 0.45) / 0.55;
+            const ease = subT * subT * (3 - 2 * subT);
+            ensureDriverDetachedToWorld(
+              THREE.MathUtils.lerp(3.12, 2.46, ease),
+              THREE.MathUtils.lerp(0.04, 0.17, ease),
+              THREE.MathUtils.lerp(0.12, -0.04, ease),
+              THREE.MathUtils.lerp(-Math.PI / 2, Math.PI, ease)
+            );
+            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.86, 0.84, ease));
+            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0.48, 1.0, ease), 0);
+          }
         } else {
-          // Door pulls shut & slams flush
-          const shutT = (tSec - 3.0) / 0.5;
+          // Driver cleanly seated inside cabin while door latches shut
+          const shutT = (tSec - 2.95) / 0.55;
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.22, 0, shutT);
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.25, 0, Math.min(1, shutT));
           }
           if (!playedDoorShut) {
             soundFX.playCarDoorSlam();
             playedDoorShut = true;
           }
+          ensureDriverAttachedInCabin(0);
+          // Subtle cabin door-slam settle
+          carBodyGroup.rotation.z = Math.sin(shutT * Math.PI) * -0.015;
         }
 
-        camera.position.set(5.6, 2.4, 4.8);
-        camera.lookAt(2.0, 1.1, 0);
+        camera.position.set(5.8, 2.35, 4.4);
+        camera.lookAt(2.2, 1.05, 0);
       }
 
       // -------------------------------------------------------------
@@ -430,7 +498,6 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           playedEngineRev = true;
         }
 
-        playerMesh.visible = false;
         schoolArrivalGroup.visible = false;
         if (curbsideDoor) curbsideDoor.rotation.y = 0;
 
@@ -448,26 +515,18 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         // Auto-swerving obstacle clearance logic:
         let autoSwerveTargetX: number | null = null;
         for (const tc of trafficCars) {
-          // In Three.js, cars ahead in forward direction have z < playerCar.position.z
           const distAhead = playerCar.position.z - tc.mesh.position.z;
           const dx = Math.abs(tc.mesh.position.x - playerCar.position.x);
 
-          // If car is ahead within 32 meters and in our lane path (dx < 2.2)
           if (distAhead > 0 && distAhead < 32 && dx < 2.2) {
-            // Smoothly steer to alternate open lane
-            if (playerCar.position.x < 3.75) {
-              autoSwerveTargetX = 5.5; // Shift to right lane
-            } else {
-              autoSwerveTargetX = 2.0; // Shift to left lane
-            }
+            autoSwerveTargetX = playerCar.position.x < 3.75 ? 5.5 : 2.0;
             break;
           }
 
-          // Safety guard against oncoming traffic if player drifts into negative X
           if (tc.direction < 0 && playerCar.position.x < 0.8) {
             const zDist = Math.abs(tc.mesh.position.z - playerCar.position.z);
             if (zDist < 35 && dx < 2.8) {
-              autoSwerveTargetX = 2.2; // Guide player safely back to right side of road
+              autoSwerveTargetX = 2.2;
               break;
             }
           }
@@ -479,7 +538,6 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           playerCar.position.x += Math.sign(diff) * Math.min(Math.abs(diff), 0.14);
           carSteerHeading = THREE.MathUtils.clamp(diff * 0.14, -0.15, 0.15);
         } else {
-          // Keep cruising smoothly in the right inbound lane
           const laneTargetX = 2.0;
           const diff = laneTargetX - playerCar.position.x;
           playerCar.position.x += diff * 0.05;
@@ -487,8 +545,24 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         }
 
         playerCar.position.x = THREE.MathUtils.clamp(playerCar.position.x, -5.8, 5.8);
-        playerCar.rotation.y = Math.PI - carSteerHeading; // Strictly forward heading
-        playerCar.rotation.z = carSteerHeading * 0.3;
+        playerCar.rotation.y = Math.PI - carSteerHeading;
+
+        // Sprung carBodyGroup suspension heave, turbo squat & cornering roll (tires stay planted)
+        carBodyGroup.position.y = Math.sin(now * 0.018) * 0.014;
+        carBodyGroup.rotation.x = THREE.MathUtils.lerp(
+          carBodyGroup.rotation.x,
+          isTurbo ? -0.032 : -0.008,
+          0.12
+        );
+        carBodyGroup.rotation.z = THREE.MathUtils.lerp(
+          carBodyGroup.rotation.z,
+          carSteerHeading * 0.42,
+          0.16
+        );
+
+        // Keep seated driver visibly gripped to steering wheel inside cabin
+        ensureDriverAttachedInCabin(carSteerHeading);
+        if (steeringWheel) steeringWheel.rotation.z = -carSteerHeading * 2.4;
 
         // Turn wheels in forward heading
         if (frontWheelL) frontWheelL.rotation.y = -carSteerHeading * 1.6;
@@ -510,7 +584,6 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           pad.position.z += moveDelta;
           if (pad.position.z > 120) pad.position.z -= 240;
 
-          // Check if player drives over boost pad
           if (Math.abs(pad.position.z - playerCar.position.z) < 2.0 && Math.abs(pad.position.x - playerCar.position.x) < 1.5) {
             if (!isTurboActiveRef.current) {
               activateTurbo();
@@ -518,7 +591,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           }
         });
 
-        // Traffic AI cars movement with safe following distances (never clipping through each other)
+        // Traffic AI cars movement with safe following distances
         trafficCars.forEach((tc, idx) => {
           tc.mesh.visible = true;
           if (tc.direction < 0) {
@@ -535,7 +608,6 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
             }
           }
 
-          // Check following distance with any other traffic car in the same lane
           for (let j = 0; j < trafficCars.length; j++) {
             if (j === idx) continue;
             const other = trafficCars[j];
@@ -551,96 +623,147 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         // Dynamic Chase Camera with subtle vibration
         const shake = isTurbo ? (Math.random() - 0.5) * 0.04 : 0;
         camera.position.x = playerCar.position.x + 3.4 + shake;
-        camera.position.y = 2.6 + Math.sin(now * 0.005) * 0.15;
+        camera.position.y = 2.6 + Math.sin(now * 0.005) * 0.12;
         camera.position.z = playerCar.position.z + 6.8;
         camera.lookAt(playerCar.position.x, 1.1, playerCar.position.z);
       }
 
       // -------------------------------------------------------------
-      // PHASE 3: ARRIVAL, TURNING INTO SCHOOL & STEP OUT (12.0s - 16.0s)
+      // PHASE 3: ARRIVAL, BRAKE DIVE, DOOR OPEN & CURBSIDE EXIT (12.0s - 16.0s)
       // -------------------------------------------------------------
       else {
         trafficCars.forEach((tc) => (tc.mesh.visible = false));
         schoolArrivalGroup.visible = true;
+        camera.fov = THREE.MathUtils.lerp(camera.fov, 45, 0.14);
+        camera.updateProjectionMatrix();
 
-        if (tSec < 13.5) {
-          // Decelerate & Turn into School drop-off lane
+        if (tSec < 13.4) {
+          // Decelerate & Turn into School drop-off lane with nose-dive suspension settle
           setPhaseText('Entering School Drop-Off Loop...');
-          const turnT = (tSec - 12.0) / 1.5;
-          setSpeedMph(Math.round(THREE.MathUtils.lerp(65, 12, turnT)));
+          const turnT = (tSec - 12.0) / 1.4;
+          const speed = THREE.MathUtils.lerp(65, 8, turnT);
+          setSpeedMph(Math.round(speed));
 
+          const steer = 0.14 * Math.sin(turnT * Math.PI);
           playerCar.position.x = THREE.MathUtils.lerp(playerCar.position.x, 2.0, turnT);
-          playerCar.rotation.y = Math.PI - 0.14 * Math.sin(turnT * Math.PI);
-          schoolArrivalGroup.position.z = THREE.MathUtils.lerp(-120, -10, turnT);
+          playerCar.rotation.y = Math.PI - steer;
+          carBodyGroup.rotation.x = THREE.MathUtils.lerp(0, 0.026, Math.sin(turnT * Math.PI));
+          carBodyGroup.rotation.z = steer * 0.35;
+          schoolArrivalGroup.position.z = THREE.MathUtils.lerp(-120, 0, turnT);
+
+          ensureDriverAttachedInCabin(steer);
+          if (frontWheelL) frontWheelL.rotation.y = -steer * 1.4;
+          if (frontWheelR) frontWheelR.rotation.y = -steer * 1.4;
+          if (steeringWheel) steeringWheel.rotation.z = -steer * 2.2;
+
+          const spinDelta = (speed / 30) * deltaSec * 12;
+          ['frontWheelLeft', 'frontWheelRight', 'rearWheelLeft', 'rearWheelRight'].forEach((wn) => {
+            const w = playerCar.getObjectByName(wn);
+            const spin = w?.getObjectByName('spinWheel');
+            if (spin) spin.rotation.x += spinDelta;
+          });
 
           camera.position.set(5.8, 2.6, 6.2);
           camera.lookAt(playerCar.position.x, 1.1, 0);
-        } else if (tSec >= 13.5 && tSec < 14.5) {
-          // Glides flush to stop at curb (x=2.0)
+        } else if (tSec < 14.15) {
+          // Parked flush at curb -> door swings completely open BEFORE driver steps out
           setPhaseText('Parked at Schoolyard Entrance');
           setSpeedMph(0);
           playerCar.position.set(2.0, 0, 0);
           playerCar.rotation.set(0, Math.PI, 0);
+          carBodyGroup.position.set(0, 0, 0);
+          carBodyGroup.rotation.set(0, 0, 0);
           schoolArrivalGroup.position.z = 0;
-          if (curbsideDoor) curbsideDoor.rotation.y = 0;
-        } else if (tSec >= 14.5 && tSec < 15.5) {
-          // Door swings open outward towards sidewalk, player steps out onto school grounds!
-          setPhaseText('Stepping Out onto School Blacktop...');
-          const outT = (tSec - 14.5) / 1.0;
+
+          if (frontWheelL) frontWheelL.rotation.y = 0;
+          if (frontWheelR) frontWheelR.rotation.y = 0;
+          if (steeringWheel) steeringWheel.rotation.z = 0;
+
+          ensureDriverAttachedInCabin(0);
+
           if (!playedArrivalDoor) {
             soundFX.playCarDoorOpen();
             playedArrivalDoor = true;
           }
-          if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.22, Math.min(1.0, outT * 1.5));
-          }
+          const doorOpenT = (tSec - 13.4) / 0.75;
+          const easeDoor = Math.sin((Math.min(1, doorOpenT) * Math.PI) / 2);
+          if (curbsideDoor) curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.25, easeDoor);
+        } else if (tSec < 15.35) {
+          // Step cleanly out of open doorway behind open door blade, then walk along sidewalk
+          setPhaseText('Stepping Out onto School Blacktop...');
+          const outT = (tSec - 14.15) / 1.2;
           playerMesh.visible = true;
+          if (curbsideDoor) curbsideDoor.rotation.y = 1.25;
 
-          // Step 1: Step out of seat towards sidewalk (outT < 0.45)
-          // Step 2: Turn forward and walk toward school gate (outT >= 0.45)
-          if (outT < 0.45) {
-            const subT = outT / 0.45;
-            playerMesh.position.x = THREE.MathUtils.lerp(1.55, 3.1, subT);
-            playerMesh.position.y = THREE.MathUtils.lerp(-0.25, 0, subT);
-            playerMesh.position.z = 0.1;
-            playerMesh.rotation.y = Math.PI / 2; // Facing the sidewalk as they step out
+          if (outT < 0.42) {
+            // Pivot legs & slide crouch-height from driver seat -> open doorway sill
+            const subT = outT / 0.42;
+            const ease = subT * subT * (3 - 2 * subT);
+            ensureDriverDetachedToWorld(
+              THREE.MathUtils.lerp(2.46, 3.12, ease),
+              THREE.MathUtils.lerp(0.17, 0.04, ease),
+              THREE.MathUtils.lerp(-0.04, 0.14, ease),
+              THREE.MathUtils.lerp(Math.PI, Math.PI / 2, ease)
+            );
+            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.84, 0.88, ease));
+            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(1.0, 0.45, ease), 0);
+          } else if (outT < 0.72) {
+            // Step onto sidewalk outside door sweep arc & stand upright
+            const subT = (outT - 0.42) / 0.30;
+            const ease = subT * subT * (3 - 2 * subT);
+            ensureDriverDetachedToWorld(
+              THREE.MathUtils.lerp(3.12, 3.78, ease),
+              THREE.MathUtils.lerp(0.04, 0, ease),
+              THREE.MathUtils.lerp(0.14, 0.65, ease),
+              THREE.MathUtils.lerp(Math.PI / 2, Math.atan2(4.25 - 3.78, -0.85 - 0.65), ease)
+            );
+            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.88, 1.0, ease));
+            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0.45, 0, ease), 0);
           } else {
-            const subT = (outT - 0.45) / 0.55;
-            const startX = 3.1, endX = 3.5;
-            const startZ = 0.1, endZ = -1.2;
-            playerMesh.position.x = THREE.MathUtils.lerp(startX, endX, subT);
-            playerMesh.position.y = 0;
-            playerMesh.position.z = THREE.MathUtils.lerp(startZ, endZ, subT);
-            // Face directly down the walkway towards school entrance!
-            playerMesh.rotation.y = Math.atan2(endX - startX, endZ - startZ);
-
-            // Natural walk cycle stride!
-            const walkCycle = Math.sin(subT * Math.PI * 4);
+            // Walk clear down the sidewalk past the open door tip (door tip is at x=4.16, z=-0.17)
+            const subT = (outT - 0.72) / 0.28;
+            ensureDriverDetachedToWorld(
+              THREE.MathUtils.lerp(3.78, 4.35, subT),
+              Math.abs(Math.sin(subT * Math.PI * 3)) * 0.04,
+              THREE.MathUtils.lerp(0.65, -0.95, subT),
+              Math.atan2(4.35 - 3.78, -0.95 - 0.65)
+            );
+            playerMesh.scale.setScalar(1.0);
+            setSeatedWalkReset();
+            const walkCycle = Math.sin(subT * Math.PI * 3);
             if (playerLegL) playerLegL.rotation.x = walkCycle * 0.5;
             if (playerLegR) playerLegR.rotation.x = -walkCycle * 0.5;
             if (playerArmL) playerArmL.rotation.x = -walkCycle * 0.4;
             if (playerArmR) playerArmR.rotation.x = walkCycle * 0.4;
           }
         } else {
-          // Door closes, player stands proudly at gate entrance
-          const closeT = (tSec - 15.5) / 0.5;
+          // Door shuts safely once player is past it; player strides to gate entrance
+          const closeT = (tSec - 15.35) / 0.65;
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.22, 0, closeT);
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.25, 0, Math.min(1, closeT * 1.4));
           }
           if (!playedArrivalShut) {
             soundFX.playCarDoorSlam();
             playedArrivalShut = true;
           }
-          playerMesh.position.set(3.5, 0, -1.2);
-          playerMesh.rotation.y = Math.PI; // Proudly facing the arena gates
-          if (playerLegL) playerLegL.rotation.x = 0;
-          if (playerLegR) playerLegR.rotation.x = 0;
-          if (playerArmL) playerArmL.rotation.x = 0;
-          if (playerArmR) playerArmR.rotation.x = 0;
+          const finalWalk = Math.min(1, closeT);
+          ensureDriverDetachedToWorld(
+            4.35,
+            finalWalk < 0.85 ? Math.abs(Math.sin(finalWalk * Math.PI * 2)) * 0.03 : 0,
+            THREE.MathUtils.lerp(-0.95, -2.1, finalWalk),
+            Math.PI
+          );
+          playerMesh.scale.setScalar(1.0);
+          setSeatedWalkReset();
+          const walkCycle = finalWalk < 0.85 ? Math.sin(finalWalk * Math.PI * 2) * (1 - finalWalk) : 0;
+          if (playerLegL) playerLegL.rotation.x = walkCycle * 0.45;
+          if (playerLegR) playerLegR.rotation.x = -walkCycle * 0.45;
+          if (playerArmL) playerArmL.rotation.x = -walkCycle * 0.35;
+          if (playerArmR) playerArmR.rotation.x = walkCycle * 0.35;
         }
 
-        camera.position.set(6.2, 2.5, 5.2);
-        camera.lookAt(playerCar.position.x, 1.1, 0);
+        camera.position.set(6.4, 2.5, 5.2);
+        camera.lookAt(playerCar.position.x + 0.5, 1.05, -0.3);
       }
 
       renderer.render(scene, camera);

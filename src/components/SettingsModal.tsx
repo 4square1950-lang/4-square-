@@ -91,7 +91,7 @@ const DEFAULT_SETTINGS: GameSettingsState = {
   crowdVolume: 70,
   enableVoiceCommentary: false,
 
-  cameraView: 'isometric',
+  cameraView: 'third_person',
   graphicsQuality: 'high',
   dustParticles: true,
   contactShadows: true,

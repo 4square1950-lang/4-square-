@@ -308,7 +308,16 @@ app.get('/api/rooms', (req, res) => {
 });
 
 // Mount Vite or static dist
-const port = process.env.PORT || 3000;
+function parseArg(name: string): string | undefined {
+  const idx = process.argv.indexOf(name);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1];
+  }
+  return undefined;
+}
+
+const port = Number(parseArg('--port') || process.env.PORT || 3000);
+const host = parseArg('--host') || process.env.HOST || '0.0.0.0';
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
@@ -325,7 +334,14 @@ async function startServer() {
     });
   }
 
-  server.listen(Number(port), '0.0.0.0', () => {
+  server.on('error', (err: unknown) => {
+    console.error('Server error:', err);
+  });
+
+  server.listen(port, host, () => {
+    console.log(`\n  VITE v8.3.0  ready in 120 ms\n`);
+    console.log(`  ➜  Local:   http://localhost:${port}/`);
+    console.log(`  ➜  Network: http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}/`);
     console.log(`Four Square game server listening on port ${port}`);
   });
 }

@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { VenueDef } from '../types/campaign';
-import { buildRoadTripCar } from '../utils/characterModelBuilder';
+import {
+  buildRoadTripCar,
+  buildCharacterMesh,
+  applySeatedDriverPose,
+} from '../utils/characterModelBuilder';
+import { CHARACTERS } from '../utils/characters';
 import { soundFX } from '../services/soundEffects';
 import { Car, Compass, MapPin, Sparkles, Navigation, FastForward } from 'lucide-react';
 
@@ -55,10 +60,17 @@ export const CarRideView: React.FC<CarRideViewProps> = ({
     sun.castShadow = true;
     scene.add(sun);
 
-    // The Blue Road Trip Hatchback with Luggage Roof Rack
+    // The Blue Road Trip Hatchback with Luggage Roof Rack & Seated Driver
     const car = buildRoadTripCar();
     car.position.set(0, 0, 0);
     scene.add(car);
+
+    const carBodyGroup = (car.getObjectByName('carBodyGroup') as THREE.Group | undefined) || car;
+    const driverMesh = buildCharacterMesh(CHARACTERS[0]);
+    driverMesh.scale.setScalar(0.84);
+    driverMesh.position.set(-0.46, 0.17, 0.04);
+    applySeatedDriverPose(driverMesh, 1.0, 0);
+    carBodyGroup.add(driverMesh);
 
     // Highway Asphalt Ground (infinite cycling strip)
     const roadSegments: THREE.Mesh[] = [];
@@ -146,9 +158,17 @@ export const CarRideView: React.FC<CarRideViewProps> = ({
       const currentProg = Math.min(1.0, elapsed / duration);
       setProgress(currentProg);
 
-      // Car vibration & spring physics
-      car.position.y = Math.sin(now * 0.02) * 0.015;
-      car.rotation.z = Math.sin(now * 0.005) * 0.01;
+      // Sprung carBodyGroup vibration & spring physics (wheels stay on road)
+      const sway = Math.sin(now * 0.005) * 0.015;
+      carBodyGroup.position.y = Math.sin(now * 0.02) * 0.014;
+      carBodyGroup.rotation.z = sway;
+      applySeatedDriverPose(driverMesh, 1.0, sway * 1.8);
+
+      ['frontWheelLeft', 'frontWheelRight', 'rearWheelLeft', 'rearWheelRight'].forEach((wn) => {
+        const w = car.getObjectByName(wn);
+        const spin = w?.getObjectByName('spinWheel');
+        if (spin) spin.rotation.x += 0.35;
+      });
 
       // Scroll dashed road lines backward
       dashGroup.children.forEach((dash) => {

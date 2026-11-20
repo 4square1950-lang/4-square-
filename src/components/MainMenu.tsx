@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Play,
   Footprints,
@@ -8,7 +8,6 @@ import {
   ListOrdered,
   Gem,
   Settings as SettingsIcon,
-  Palette,
   Pause,
   Play as PlayIcon,
   SkipForward,
@@ -21,6 +20,12 @@ import {
   ChevronRight,
   Flame,
   Award,
+  Video,
+  VideoOff,
+  Accessibility,
+  Eye,
+  Sliders,
+  Volume2,
 } from 'lucide-react';
 import { VenueDef } from '../types/campaign';
 import { FourSquareCoin } from './FourSquareCoin';
@@ -49,9 +54,40 @@ interface MainMenuProps {
   currentTrackName: string;
   isCommentaryEnabled?: boolean;
   onToggleCommentary?: () => void;
+  isMenuVideoDisabled?: boolean;
+  onToggleDisableMenuVideo?: () => void;
 }
 
-type MainCategory = 'HOME' | 'PLAY' | 'MULTIPLAYER' | 'CHARACTER CUSTOMIZATION';
+export type MenuNavKey =
+  | 'PROFILE'
+  | 'SETTINGS'
+  | 'PLAY_NOW'
+  | 'ROSTERS'
+  | 'CAMPAIGN'
+  | 'TOURNAMENTS'
+  | 'TUTORIAL'
+  | 'ONLINE_MULTIPLAYER'
+  | 'LOCAL_MULTIPLAYER'
+  | 'STANDINGS_STATS'
+  | 'SHOP_STORE'
+  | 'CHARACTER_CUSTOMIZATION'
+  | 'VENUES_ARENAS'
+  | 'CREDITS_CREDIBILITY';
+
+interface NavOption {
+  id: MenuNavKey;
+  label: string;
+  subtitle: string;
+  category: string;
+  description: string;
+  badge?: string;
+  tagline: string;
+  action: () => void;
+  icon: React.ComponentType<{ className?: string }>;
+  accentColor: string;
+  crestShieldText: string;
+  crestEmoji: string;
+}
 
 export const MainMenu: React.FC<MainMenuProps> = ({
   coins,
@@ -76,609 +112,438 @@ export const MainMenu: React.FC<MainMenuProps> = ({
   currentTrackName,
   isCommentaryEnabled = false,
   onToggleCommentary,
+  isMenuVideoDisabled = false,
+  onToggleDisableMenuVideo,
 }) => {
-  const [activeTab, setActiveTab] = useState<MainCategory>('HOME');
-  const [hoveredTile, setHoveredTile] = useState<string | null>(null);
-
-  const navItems: Array<{ id: MainCategory; label: string }> = [
-    { id: 'HOME', label: 'HOME' },
-    { id: 'PLAY', label: 'PLAY' },
-    { id: 'MULTIPLAYER', label: 'MULTIPLAYER' },
-    { id: 'CHARACTER CUSTOMIZATION', label: 'CHARACTER CUSTOMIZATION' },
+  // Navigation options array with Profile placed directly above Settings near bottom
+  const menuOptions: NavOption[] = [
+    {
+      id: 'PLAY_NOW',
+      label: 'PLAY NOW',
+      subtitle: 'PLAY NOW',
+      category: 'INSTANT SCHOOLYARD KICKOFF',
+      description: 'Instant schoolyard kickoff match with full 4-square rules and contenders.',
+      tagline: 'Instant Schoolyard Kickoff',
+      badge: 'POPULAR',
+      action: onPlayNow,
+      icon: Play,
+      accentColor: '#3b82f6',
+      crestShieldText: 'PLAY NOW',
+      crestEmoji: '⚡',
+    },
+    {
+      id: 'ROSTERS',
+      label: 'PLAYERS',
+      subtitle: 'PLAYERS',
+      category: '16 CONTENDERS • COIN BOOSTS',
+      description: 'Inspect 16 unique contenders, view stats, and boost your athlete attributes.',
+      tagline: 'Meet the Contenders & Boost Stats',
+      action: onMeetPlayers,
+      icon: Users,
+      accentColor: '#8b5cf6',
+      crestShieldText: 'PLAYERS',
+      crestEmoji: '👥',
+    },
+    {
+      id: 'CAMPAIGN',
+      label: 'CAMPAIGN',
+      subtitle: 'CAMPAIGN',
+      category: 'SCHOOL CAMPUS EXPLORATION',
+      description: 'Arrive by road trip car, explore school hallways, talk to students & challenge courts!',
+      tagline: 'Enter Campus Tour',
+      badge: 'FEATURED',
+      action: onCampaignMode,
+      icon: Footprints,
+      accentColor: '#38bdf8',
+      crestShieldText: 'CAMPAIGN',
+      crestEmoji: '🏫',
+    },
+    {
+      id: 'TOURNAMENTS',
+      label: 'TOURNAMENTS',
+      subtitle: 'TOURNAMENTS',
+      category: 'FULL PAGE 8-PLAYER SHOWDOWN',
+      description: 'Automatic federation venues, 8-player bracket showdown, and 250 coins grand prize!',
+      tagline: 'Enter Championship Bracket • 250 Coins Prize',
+      badge: '250 COINS',
+      action: onTournament,
+      icon: Trophy,
+      accentColor: '#eab308',
+      crestShieldText: 'TOURNAMENTS',
+      crestEmoji: '🏆',
+    },
+    {
+      id: 'TUTORIAL',
+      label: 'TUTORIAL',
+      subtitle: 'TUTORIAL',
+      category: 'RULES & KNOWLEDGE QUIZZES',
+      description: 'Classroom lessons, Four Square trivia quizzes, coin prizes & referee tips!',
+      tagline: 'Enter Classroom',
+      action: onTutorial,
+      icon: GraduationCap,
+      accentColor: '#10b981',
+      crestShieldText: 'TUTORIAL',
+      crestEmoji: '🎓',
+    },
+    {
+      id: 'ONLINE_MULTIPLAYER',
+      label: 'ONLINE NOW',
+      subtitle: 'ONLINE NOW',
+      category: 'ONLINE MULTIPLAYER & LOCAL PASS & PLAY',
+      description: 'Challenge players nationwide over WebSockets or play same-device 4-player couch Pass & Play!',
+      tagline: 'Online Matchmaking & Local Pass & Play',
+      badge: 'LIVE',
+      action: onOnlineMatch,
+      icon: Globe,
+      accentColor: '#06b6d4',
+      crestShieldText: 'ONLINE NOW',
+      crestEmoji: '🌐',
+    },
+    {
+      id: 'STANDINGS_STATS',
+      label: 'STANDINGS & STATS',
+      subtitle: 'STANDINGS & STATS',
+      category: 'INDIVIDUAL PLAYER RANKINGS',
+      description: 'Contender rankings, individual stats, win rates, crown streaks, and smash speeds.',
+      tagline: 'Contender Rankings & Stats',
+      action: onStandings,
+      icon: ListOrdered,
+      accentColor: '#3b82f6',
+      crestShieldText: 'STANDINGS',
+      crestEmoji: '📊',
+    },
+    {
+      id: 'SHOP_STORE',
+      label: 'SHOP',
+      subtitle: 'SHOP',
+      category: 'LOCKER & EQUIPMENT PACKS',
+      description: 'Unlock retro outfits, beast avatars, gold chains, and game boosters with your coins.',
+      tagline: 'Unlock Contenders & Boosts',
+      action: onLocker,
+      icon: Gem,
+      accentColor: '#f97316',
+      crestShieldText: 'SHOP',
+      crestEmoji: '💎',
+    },
+    {
+      id: 'CHARACTER_CUSTOMIZATION',
+      label: 'CHARACTER STUDIO',
+      subtitle: 'CHARACTER STUDIO',
+      category: 'FULL 3D ATHLETE CUSTOMIZER',
+      description: 'Creature archetypes, jerseys, number, skin tones, accessories, sunglasses, and attributes.',
+      tagline: 'Customize Your Contender',
+      action: onCustomizer,
+      icon: Sparkles,
+      accentColor: '#a855f7',
+      crestShieldText: 'STUDIO',
+      crestEmoji: '✨',
+    },
+    {
+      id: 'VENUES_ARENAS',
+      label: 'VENUES',
+      subtitle: 'VENUES',
+      category: 'CIRCUIT LOCATIONS',
+      description: 'Switch between Blacktop Driveways, Lincoln High Gymnasium, & Championship Stadiums.',
+      tagline: `Select Active Arena • Current: ${activeVenue.name}`,
+      action: onArenas,
+      icon: Compass,
+      accentColor: '#14b8a6',
+      crestShieldText: 'VENUES',
+      crestEmoji: '📍',
+    },
+    {
+      id: 'PROFILE',
+      label: 'PROFILE',
+      subtitle: 'PROFILE',
+      category: 'ATHLETE STATISTICS & FRIENDS',
+      description: 'View full athlete stats, followers, friends activity feed, trophy case badges, and win rates.',
+      tagline: 'Athlete Profile & Social Feed',
+      badge: 'PRO',
+      action: () => { if (onOpenProfile) onOpenProfile(); },
+      icon: User,
+      accentColor: '#3b82f6',
+      crestShieldText: 'PROFILE',
+      crestEmoji: '👤',
+    },
+    {
+      id: 'SETTINGS',
+      label: 'SETTINGS',
+      subtitle: 'SETTINGS',
+      category: 'AUDIO, VOICE & DISPLAY CONTROLS',
+      description: 'Configure sound FX, music tracks, voice commentary, graphic quality, and game preferences.',
+      tagline: 'Game Settings & Voice Controls',
+      action: onSettings,
+      icon: SettingsIcon,
+      accentColor: '#6366f1',
+      crestShieldText: 'SETTINGS',
+      crestEmoji: '⚙️',
+    },
+    {
+      id: 'CREDITS_CREDIBILITY',
+      label: 'CREDITS & CREDIBILITY',
+      subtitle: 'CREDITS & CREDIBILITY',
+      category: 'GAME ARCHITECTURE & RULES',
+      description: 'Official rules, game origins, federation history, and creator credibility.',
+      tagline: 'Rules & Game Creators',
+      action: onCreditsCredibility,
+      icon: Award,
+      accentColor: '#6366f1',
+      crestShieldText: 'CREDITS',
+      crestEmoji: '📜',
+    },
   ];
 
+  const [selectedId, setSelectedId] = useState<MenuNavKey>('PLAY_NOW');
+  const selectedOption = menuOptions.find((o) => o.id === selectedId) || menuOptions[0];
+  const lastButtonClickRef = useRef<{ id: MenuNavKey; time: number } | null>(null);
+  const lastLaunchTimeRef = useRef<number>(0);
+
+  const launchOption = (opt: NavOption) => {
+    const now = performance.now();
+    if (now - lastLaunchTimeRef.current < 350) return;
+    lastLaunchTimeRef.current = now;
+    opt.action();
+  };
+
   return (
-    <div className="absolute inset-0 z-30 pointer-events-none flex flex-col justify-between p-4 sm:p-8 select-none font-sans overflow-hidden text-white">
-      {/* Background Subtle Gradient Overlay */}
-      <div className="absolute inset-0 bg-linear-to-b from-slate-950/75 via-slate-950/40 to-slate-950/90 pointer-events-none" />
+    <div className="absolute inset-0 z-30 pointer-events-none flex flex-col justify-between select-none font-sans overflow-hidden text-white">
+      {/* Background Subtle Vignette Overlay - Open and Transparent on Right Side to view 3D Match Video */}
+      <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/25 to-transparent pointer-events-none" />
 
       {/* ========================================================================= */}
-      {/* TOP BAR: Navigation Categories & Profile */}
+      {/* TOP HEADER: FS27 BRANDING, WALLET & ARENA INFO (CLEAN, NO MIDDLE BUTTON)  */}
       {/* ========================================================================= */}
-      <div className="relative z-10 pointer-events-auto flex items-center justify-between gap-4 flex-wrap">
-        {/* Left: 4-Square Logo & Nav Tabs */}
-        <div className="flex items-center gap-4 sm:gap-8 flex-wrap">
-          <div className="flex items-center gap-2.5">
-            <div className="relative w-10 h-10 rounded-xl overflow-hidden shadow-xl grid grid-cols-2 grid-rows-2 border border-white/20">
-              <div className="bg-emerald-500" />
-              <div className="bg-amber-400" />
-              <div className="bg-rose-500" />
-              <div className="bg-blue-600" />
-              <div className="absolute inset-0 m-auto w-5 h-5 bg-white rounded-full flex items-center justify-center font-black text-slate-950 text-xs shadow">
-                4
-              </div>
-            </div>
-            <div className="font-black italic tracking-tighter text-xl text-white drop-shadow">
-              FOUR SQUARE
-            </div>
-          </div>
-
-          {/* Nav Tabs */}
-          <div className="flex items-center gap-1 sm:gap-2 bg-slate-950/90 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-700/60 shadow-xl">
-            {navItems.map((item) => {
-              const isActive = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    soundFX.playClick();
-                    setActiveTab(item.id);
-                    if (item.id === 'MULTIPLAYER') onOnlineMatch();
-                    if (item.id === 'CHARACTER CUSTOMIZATION') onCustomizer();
-                  }}
-                  className={`relative px-4 py-2 rounded-xl text-sm font-black tracking-wider uppercase transition-all cursor-pointer ${
-                    isActive
-                      ? 'text-white bg-linear-to-r from-blue-600 via-indigo-600 to-blue-700 shadow-md border border-blue-400/40'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                  }`}
-                >
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Right: Featured Athlete Profile Container, Coins Wallet & Active Venue */}
+      <div className="relative z-20 pointer-events-auto flex items-center justify-between px-6 pt-5 pb-3">
+        {/* Top Left: Stylized FS27 Logo Badge */}
         <div className="flex items-center gap-3">
-          {/* Featured Athlete Profile Card Container */}
-          <div
-            onClick={() => {
-              soundFX.playClick();
-              if (onOpenProfile) onOpenProfile();
-            }}
-            className="h-16 px-5 rounded-2xl bg-linear-to-r from-blue-950/95 via-indigo-950/90 to-slate-900/95 border-2 border-blue-400/80 hover:border-blue-300 shadow-2xl flex items-center gap-3.5 cursor-pointer group hover:scale-[1.02] active:scale-95 transition-all shrink-0"
-            title="Open Athlete Profile & Saved Replays"
-          >
-            <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-black shadow-md group-hover:scale-110 transition-transform">
-              <User className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="text-xs font-black uppercase text-white tracking-wider flex items-center gap-1.5">
-                <span>PROFILE</span>
-                <span className="text-[10px] font-mono bg-blue-500/30 text-blue-300 px-1.5 py-0.5 rounded border border-blue-400/40">
-                  REPLAYS
-                </span>
-              </div>
-              <div className="text-[11px] text-slate-300 font-mono font-medium">
-                Stats • Highlights • History
-              </div>
-            </div>
-            <ChevronRight className="w-4.5 h-4.5 text-blue-400 group-hover:translate-x-1 transition-transform ml-1" />
+          <div className="flex items-center gap-1 font-black italic tracking-tighter text-2xl text-white drop-shadow-[0_2px_8px_rgba(255,255,255,0.4)]">
+            <span className="text-amber-400">⚡</span>
+            <span>FS</span>
+            <span className="text-blue-400">27</span>
           </div>
 
-          {/* FourSquare Coin Wallet Container Card */}
-          <div className="h-16 px-5 rounded-2xl bg-slate-950/95 backdrop-blur-md border-2 border-amber-500/70 text-amber-300 font-mono text-sm font-black shadow-2xl flex items-center gap-3 shrink-0">
-            <FourSquareCoin size={22} animate />
-            <div className="flex flex-col">
-              <span className="text-[10px] text-amber-400/80 font-mono font-bold leading-none">WALLET</span>
-              <span className="text-sm font-black text-amber-300">{coins} COINS</span>
-            </div>
-          </div>
-
-          {/* Active Venue Arena Location Container Card */}
-          <div
-            onClick={() => {
-              soundFX.playClick();
-              onArenas();
-            }}
-            className="hidden xl:flex h-16 px-5 rounded-2xl bg-slate-950/95 hover:bg-slate-900 border-2 border-slate-700/80 hover:border-cyan-400 text-slate-200 font-black shadow-2xl items-center gap-3 cursor-pointer transition-all hover:scale-[1.02] active:scale-95 shrink-0"
-          >
-            <div className="w-9 h-9 rounded-xl bg-cyan-950 text-cyan-400 border border-cyan-500/40 flex items-center justify-center">
-              <Compass className="w-5 h-5" />
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[10px] text-cyan-400 font-mono font-bold leading-none">ACTIVE ARENA</span>
-              <span className="text-sm font-black text-white truncate max-w-[130px]">{activeVenue.name}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ========================================================================= */}
-      {/* MAIN VIEW: DYNAMIC TILE GRID ACCORDING TO ACTIVE TAB */}
-      {/* ========================================================================= */}
-      <div className="relative z-10 pointer-events-auto my-auto py-4">
-        {/* ------------------------------------------------------------- */}
-        {/* VIEW 1: HOME & PLAY MODES (Filtered dynamically) */}
-        {/* ------------------------------------------------------------- */}
-        {(activeTab === 'HOME' || activeTab === 'PLAY') && (
-          <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-12 gap-4 h-[58vh] max-h-[540px]">
-            {/* 1. HERO TILE: Play Now Kickoff Showdown */}
-            <div
-              onClick={() => {
-                soundFX.playClick();
-                onPlayNow();
-              }}
-              onMouseEnter={() => setHoveredTile('kickoff')}
-              onMouseLeave={() => setHoveredTile(null)}
-              className="md:col-span-4 h-full rounded-3xl overflow-hidden relative border-2 border-blue-500/80 shadow-[0_15px_40px_rgba(37,99,235,0.35)] transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-blue-400 bg-linear-to-b from-blue-950/90 via-slate-950/85 to-black/95 flex flex-col justify-between p-6"
-            >
-              <div className="relative z-10 flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-mono font-black tracking-widest uppercase text-blue-400 drop-shadow">
-                    INSTANT SCHOOLYARD KICKOFF
-                  </span>
-                  <h3 className="text-3xl sm:text-4xl font-black italic tracking-tight text-white uppercase drop-shadow-[0_2px_15px_rgba(37,99,235,0.7)] mt-1">
-                    PLAY NOW
-                  </h3>
-                </div>
-                <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center font-black shadow-lg shadow-blue-600/50 group-hover:scale-110 transition-transform">
-                  <Play className="w-6 h-6 fill-current" />
-                </div>
-              </div>
-
-              {/* Middle Matchup Graphics */}
-              <div className="relative z-10 my-auto py-4">
-                <div className="bg-slate-950/80 backdrop-blur-md rounded-2xl p-4 border border-blue-500/30 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-amber-400 text-slate-950 flex items-center justify-center font-black text-sm shadow">
-                      🦅
-                    </div>
-                    <div>
-                      <div className="text-xs font-black text-white">Oakridge Hawks</div>
-                      <div className="text-[10px] text-amber-300 font-mono">Rank #1 Contender</div>
-                    </div>
-                  </div>
-
-                  <span className="text-xs font-mono font-black text-blue-400">VS</span>
-
-                  <div className="flex items-center gap-3 text-right">
-                    <div>
-                      <div className="text-xs font-black text-white">Metro Aces</div>
-                      <div className="text-[10px] text-sky-300 font-mono">Reigning Kings</div>
-                    </div>
-                    <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-black text-sm shadow">
-                      👑
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Bottom CTA Button */}
-              <div className="relative z-10">
-                <div className="w-full py-3 px-4 rounded-xl bg-linear-to-r from-blue-600 via-indigo-600 to-blue-700 text-white font-black text-sm uppercase tracking-wider flex items-center justify-between shadow-xl group-hover:brightness-110 transition-all border border-blue-400/30">
-                  <span>Kick Off Match</span>
-                  <span className="font-mono text-xs bg-black/40 px-2 py-0.5 rounded">↵ Select</span>
-                </div>
-              </div>
-            </div>
-
-            {/* MIDDLE COLUMN: ROSTERS (if HOME) / QUICK MATCH (if PLAY) & TOURNAMENTS */}
-            <div className="md:col-span-4 h-full flex flex-col gap-4">
-              {activeTab === 'HOME' ? (
-                /* Tile 2: ROSTERS (Renamed from ULTIMATE SQUAD) */
-                <div
-                  onClick={() => {
-                    soundFX.playClick();
-                    onMeetPlayers();
-                  }}
-                  onMouseEnter={() => setHoveredTile('squad')}
-                  onMouseLeave={() => setHoveredTile(null)}
-                  className="flex-1 rounded-3xl overflow-hidden relative border-2 border-indigo-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-indigo-400 bg-linear-to-br from-indigo-950/90 via-slate-950/90 to-blue-950/80 p-5 flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[11px] font-mono font-black tracking-widest uppercase text-indigo-400">
-                        16 CONTENDERS • COIN BOOSTS
-                      </span>
-                      <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                        ROSTERS
-                      </h4>
-                    </div>
-                    <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow">
-                      <Users className="w-4.5 h-4.5" />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-center gap-2 py-1">
-                    <div className="w-14 h-20 rounded-xl bg-linear-to-b from-amber-400 to-yellow-600 p-1.5 text-slate-950 flex flex-col justify-between shadow-lg transform -rotate-6">
-                      <div className="text-[10px] font-black font-mono leading-none">94<br/><span className="text-[8px]">S</span></div>
-                      <div className="text-[10px] text-center">👦</div>
-                      <div className="text-[8px] font-black uppercase text-center truncate">PATCH</div>
-                    </div>
-
-                    <div className="w-16 h-22 rounded-xl bg-linear-to-b from-blue-400 via-indigo-500 to-blue-700 p-1.5 text-white flex flex-col justify-between shadow-2xl z-10 border border-white/60">
-                      <div className="text-xs font-black font-mono leading-none">97<br/><span className="text-[8px]">K</span></div>
-                      <div className="text-xs text-center">⚡</div>
-                      <div className="text-[9px] font-black uppercase text-center truncate">BOLT</div>
-                    </div>
-
-                    <div className="w-14 h-20 rounded-xl bg-linear-to-b from-slate-300 to-slate-500 p-1.5 text-slate-950 flex flex-col justify-between shadow-lg transform rotate-6">
-                      <div className="text-[10px] font-black font-mono leading-none">91<br/><span className="text-[8px]">D</span></div>
-                      <div className="text-[10px] text-center">🛡️</div>
-                      <div className="text-[8px] font-black uppercase text-center truncate">TITAN</div>
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-indigo-300 font-mono font-bold flex items-center justify-between">
-                    <span>Meet the Players & Boost Stats</span>
-                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                  </div>
-                </div>
-              ) : (
-                /* Tile 2 (PLAY Tab): QUICK MATCH SHOWDOWN */
-                <div
-                  onClick={() => {
-                    soundFX.playClick();
-                    onQuickMatch();
-                  }}
-                  onMouseEnter={() => setHoveredTile('quickmatch')}
-                  onMouseLeave={() => setHoveredTile(null)}
-                  className="flex-1 rounded-3xl overflow-hidden relative border-2 border-cyan-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-cyan-400 bg-linear-to-br from-cyan-950/90 via-slate-950/90 to-blue-950/80 p-5 flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[11px] font-mono font-black tracking-widest uppercase text-cyan-400">
-                        INSTANT SHUTOUT RALLY
-                      </span>
-                      <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                        QUICK MATCH
-                      </h4>
-                    </div>
-                    <div className="w-9 h-9 rounded-xl bg-cyan-500 text-slate-950 flex items-center justify-center shadow font-black">
-                      <Zap className="w-4.5 h-4.5 fill-current" />
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-300 font-medium">
-                    Jump straight into a 5-point King of the Court rally with randomized contenders.
-                  </div>
-
-                  <div className="text-xs text-cyan-300 font-mono font-bold flex items-center justify-between">
-                    <span>Instant Kickoff</span>
-                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                  </div>
-                </div>
-              )}
-
-              {/* Tile 3: TOURNAMENTS */}
-              <div
-                onClick={() => {
-                  soundFX.playClick();
-                  onTournament();
-                }}
-                onMouseEnter={() => setHoveredTile('tournament')}
-                onMouseLeave={() => setHoveredTile(null)}
-                className="flex-1 rounded-3xl overflow-hidden relative border-2 border-amber-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-amber-400 bg-linear-to-br from-amber-950/80 via-slate-950/90 to-yellow-950/80 p-5 flex flex-col justify-between"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-[11px] font-mono font-black tracking-widest uppercase text-amber-400">
-                      FULL PAGE 8-PLAYER SHOWDOWN
-                    </span>
-                    <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                      TOURNAMENTS
-                    </h4>
-                  </div>
-                  <div className="w-9 h-9 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center shadow font-black">
-                    <Trophy className="w-4.5 h-4.5 fill-current" />
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between bg-slate-950/70 px-3.5 py-2 rounded-xl border border-amber-500/30">
-                  <span className="text-xs text-slate-300 font-medium">Automatic Federation Venues</span>
-                  <span className="text-xs font-mono font-black text-amber-300">250 COINS PRIZE</span>
-                </div>
-
-                <div className="text-xs text-amber-300 font-mono font-bold flex items-center justify-between">
-                  <span>Enter Championship Bracket</span>
-                  <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT COLUMN: CAMPAIGN & TUTORIAL / ARENAS */}
-            <div className="md:col-span-4 h-full flex flex-col gap-4">
-              {/* Tile 4: CAMPAIGN (Renamed from NEW CAREER) */}
-              <div
-                onClick={() => {
-                  soundFX.playClick();
-                  onCampaignMode();
-                }}
-                onMouseEnter={() => setHoveredTile('career')}
-                onMouseLeave={() => setHoveredTile(null)}
-                className="flex-1 rounded-3xl overflow-hidden relative border-2 border-blue-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-blue-400 bg-linear-to-br from-blue-950/80 via-slate-950/90 to-indigo-950/80 p-5 flex flex-col justify-between"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-[11px] font-mono font-black tracking-widest uppercase text-blue-400">
-                      SCHOOL CAMPUS EXPLORATION
-                    </span>
-                    <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                      CAMPAIGN
-                    </h4>
-                  </div>
-                  <div className="w-9 h-9 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow font-black">
-                    <Footprints className="w-4.5 h-4.5" />
-                  </div>
-                </div>
-
-                <div className="text-xs text-slate-300 font-medium">
-                  Arrive by road trip car, explore school hallways, talk to students & challenge courts!
-                </div>
-
-                <div className="text-xs text-blue-300 font-mono font-bold flex items-center justify-between">
-                  <span>Enter Campus Tour</span>
-                  <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                </div>
-              </div>
-
-              {activeTab === 'HOME' ? (
-                /* Tile 5: TUTORIAL (Renamed from SKILL GAMES) */
-                <div
-                  onClick={() => {
-                    soundFX.playClick();
-                    onTutorial();
-                  }}
-                  onMouseEnter={() => setHoveredTile('skills')}
-                  onMouseLeave={() => setHoveredTile(null)}
-                  className="flex-1 rounded-3xl overflow-hidden relative border-2 border-indigo-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-indigo-400 bg-linear-to-br from-indigo-950/80 via-slate-950/90 to-slate-900/80 p-5 flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[11px] font-mono font-black tracking-widest uppercase text-indigo-300">
-                        RULES & KNOWLEDGE QUIZZES
-                      </span>
-                      <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                        TUTORIAL
-                      </h4>
-                    </div>
-                    <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow font-black">
-                      <GraduationCap className="w-4.5 h-4.5" />
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-300 font-medium">
-                    Classroom lessons, Four Square trivia quizzes, coin prizes & referee tips!
-                  </div>
-
-                  <div className="text-xs text-indigo-300 font-mono font-bold flex items-center justify-between">
-                    <span>Enter Classroom</span>
-                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                  </div>
-                </div>
-              ) : (
-                /* Tile 5 (PLAY Tab): VENUES & ARENAS SELECTOR */
-                <div
-                  onClick={() => {
-                    soundFX.playClick();
-                    onArenas();
-                  }}
-                  onMouseEnter={() => setHoveredTile('arenas')}
-                  onMouseLeave={() => setHoveredTile(null)}
-                  className="flex-1 rounded-3xl overflow-hidden relative border-2 border-emerald-500/70 shadow-lg transition-all duration-200 cursor-pointer group hover:scale-[1.02] hover:border-emerald-400 bg-linear-to-br from-emerald-950/80 via-slate-950/90 to-teal-950/80 p-5 flex flex-col justify-between"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[11px] font-mono font-black tracking-widest uppercase text-emerald-400">
-                        CIRCUIT LOCATIONS
-                      </span>
-                      <h4 className="text-xl sm:text-2xl font-black italic tracking-tight text-white uppercase mt-0.5">
-                        VENUES & ARENAS
-                      </h4>
-                    </div>
-                    <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow font-black">
-                      <Compass className="w-4.5 h-4.5" />
-                    </div>
-                  </div>
-
-                  <div className="text-xs text-slate-300 font-medium">
-                    Switch between Blacktop Driveways, Lincoln High Gymnasium, & Championship Stadiums.
-                  </div>
-
-                  <div className="text-xs text-emerald-300 font-mono font-bold flex items-center justify-between">
-                    <span>Select Active Arena</span>
-                    <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ------------------------------------------------------------- */}
-        {/* VIEW 2: MULTIPLAYER TAB VIEW */}
-        {/* ------------------------------------------------------------- */}
-        {activeTab === 'MULTIPLAYER' && (
-          <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6 h-[50vh] max-h-[480px]">
-            <div
-              onClick={() => {
-                soundFX.playClick();
-                onOnlineMatch();
-              }}
-              className="rounded-3xl border-2 border-blue-500/80 bg-slate-950/90 backdrop-blur-md p-8 flex flex-col justify-between shadow-2xl hover:border-blue-400 cursor-pointer transition-all group"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-mono font-black text-blue-400 uppercase tracking-widest">
-                    GLOBAL LOBBY MATCHMAKING
-                  </span>
-                  <h3 className="text-3xl font-black italic text-white uppercase mt-1">
-                    ONLINE MULTIPLAYER
-                  </h3>
-                </div>
-                <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-lg">
-                  <Globe className="w-6 h-6" />
-                </div>
-              </div>
-              <p className="text-sm text-slate-300 font-medium">
-                Challenge players nationwide over WebSockets. Join room codes or auto-matchmake on the official Four Square server!
-              </p>
-
-              <div className="w-full py-3 px-4 rounded-xl bg-blue-600 text-white font-black text-sm uppercase tracking-wider flex items-center justify-between shadow-lg group-hover:bg-blue-500">
-                <span>Find Room / Host Match</span>
-                <ChevronRight className="w-5 h-5" />
-              </div>
-            </div>
-
-            <div
-              onClick={() => {
-                soundFX.playClick();
-                onOnlineMatch();
-              }}
-              className="rounded-3xl border-2 border-indigo-500/80 bg-slate-950/90 backdrop-blur-md p-8 flex flex-col justify-between shadow-2xl hover:border-indigo-400 cursor-pointer transition-all group"
-            >
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-mono font-black text-indigo-400 uppercase tracking-widest">
-                    SAME DEVICE 4-PLAYER
-                  </span>
-                  <h3 className="text-3xl font-black italic text-white uppercase mt-1">
-                    LOCAL PASS & PLAY
-                  </h3>
-                </div>
-                <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-lg">
-                  <Users className="w-6 h-6" />
-                </div>
-              </div>
-              <p className="text-sm text-slate-300 font-medium">
-                Share standard keyboard controls (WASD, Arrows, Numpad, IJKL) for a 4-player local couch competition!
-              </p>
-
-              <div className="w-full py-3 px-4 rounded-xl bg-indigo-600 text-white font-black text-sm uppercase tracking-wider flex items-center justify-between shadow-lg group-hover:bg-indigo-500">
-                <span>Start Local Match</span>
-                <ChevronRight className="w-5 h-5" />
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ========================================================================= */}
-      {/* BOTTOM BAR: DISTINCT FEATURE CONTAINER CARDS (Standings, Shop, Credits) */}
-      {/* ========================================================================= */}
-      <div className="relative z-10 pointer-events-auto flex items-center justify-between gap-4 flex-wrap pt-2">
-        {/* Left: Distinct Feature Container Cards (Not standard tiny buttons!) */}
-        <div className="flex items-center gap-4 flex-wrap flex-1">
-          {/* Container Card 1: STANDINGS & STATS */}
-          <div
-            onClick={() => {
-              soundFX.playClick();
-              onStandings();
-            }}
-            className="flex-1 min-w-[260px] p-4 rounded-3xl bg-linear-to-br from-blue-950/95 via-slate-950/90 to-indigo-950/95 border-2 border-blue-500/70 hover:border-blue-400 shadow-2xl flex items-center gap-4 cursor-pointer group hover:scale-[1.03] transition-all"
-          >
-            <div className="w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center font-black shadow-lg group-hover:scale-110 transition-transform shrink-0">
-              <ListOrdered className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-base font-black italic tracking-tight uppercase text-white leading-none">
-                STANDINGS & STATS
-              </div>
-              <div className="text-xs text-blue-300 font-mono mt-1 font-medium">
-                Contender Rankings & Stats
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-blue-400 group-hover:translate-x-1 transition-transform ml-auto shrink-0" />
-          </div>
-
-          {/* Container Card 2: SHOP & STORE */}
-          <div
-            onClick={() => {
-              soundFX.playClick();
-              onLocker();
-            }}
-            className="flex-1 min-w-[240px] p-4 rounded-3xl bg-linear-to-br from-amber-950/95 via-slate-950/90 to-yellow-950/95 border-2 border-amber-500/70 hover:border-amber-400 shadow-2xl flex items-center gap-4 cursor-pointer group hover:scale-[1.03] transition-all"
-          >
-            <div className="w-11 h-11 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center font-black shadow-lg group-hover:scale-110 transition-transform shrink-0">
-              <Gem className="w-6 h-6 fill-current" />
-            </div>
-            <div>
-              <div className="text-base font-black italic tracking-tight uppercase text-white leading-none">
-                SHOP & STORE
-              </div>
-              <div className="text-xs text-amber-300 font-mono mt-1 font-medium">
-                Unlock Contenders & Boosts
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-amber-400 group-hover:translate-x-1 transition-transform ml-auto shrink-0" />
-          </div>
-
-          {/* Container Card 3: CREDITS & CREDIBILITY */}
-          <div
-            onClick={() => {
-              soundFX.playClick();
-              onCreditsCredibility();
-            }}
-            className="flex-1 min-w-[240px] p-4 rounded-3xl bg-linear-to-br from-indigo-950/95 via-slate-950/90 to-slate-900/95 border-2 border-indigo-500/70 hover:border-indigo-400 shadow-2xl flex items-center gap-4 cursor-pointer group hover:scale-[1.03] transition-all"
-          >
-            <div className="w-11 h-11 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-black shadow-lg group-hover:scale-110 transition-transform shrink-0">
-              <Award className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-base font-black italic tracking-tight uppercase text-white leading-none">
-                CREDITS & CREDIBILITY
-              </div>
-              <div className="text-xs text-indigo-300 font-mono mt-1 font-medium">
-                Rules & Game Creators
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-indigo-400 group-hover:translate-x-1 transition-transform ml-auto shrink-0" />
-          </div>
-        </div>
-
-        {/* Right: Audio Control Container (Music & Commentary Switch Container Box) */}
-        <div className="flex items-center gap-3 bg-slate-950/95 border-2 border-slate-800 p-2.5 px-4 rounded-3xl shadow-2xl shrink-0">
-          {/* Music Radio Bar */}
-          <div className="flex items-center gap-2 pr-3 border-r border-slate-800 text-slate-200 font-mono text-xs">
-            <button
-              onClick={onToggleMusic}
-              className="p-1 hover:text-amber-400 transition-colors cursor-pointer"
-              title={isPlayingMusic ? 'Pause Music' : 'Play Music'}
-            >
-              {isPlayingMusic ? <Pause className="w-4 h-4 text-amber-400" /> : <PlayIcon className="w-4 h-4 fill-white" />}
-            </button>
-            <span className="max-w-[120px] truncate text-xs font-sans font-bold text-amber-300 hidden sm:inline">
-              {currentTrackName}
-            </span>
-            <button
-              onClick={onNextTrack}
-              className="p-1 hover:text-amber-400 transition-colors cursor-pointer"
-              title="Next Track"
-            >
-              <SkipForward className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Direct Voice Commentary Toggle Switch Container */}
           <button
             onClick={() => {
               soundFX.playClick();
               if (onToggleCommentary) onToggleCommentary();
             }}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-xl font-mono text-xs font-black uppercase transition-all cursor-pointer border ${
+            className={`h-9 px-3 rounded-xl border flex items-center gap-2 transition-all cursor-pointer shadow-lg ${
               isCommentaryEnabled
-                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/60 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
-                : 'bg-slate-900 text-slate-400 border-slate-700/80 hover:text-slate-200'
+                ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                : 'bg-slate-900/90 border-slate-700 text-slate-400 hover:text-white'
             }`}
-            title="Toggle Spoken Referee Calls & Commentary"
+            title={`Voice Commentary: ${isCommentaryEnabled ? 'ON' : 'OFF'}`}
           >
-            <span>🎙️</span>
-            <span>Commentary: {isCommentaryEnabled ? 'ON' : 'OFF'}</span>
+            <Volume2 className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline text-[11px] font-bold uppercase">VOICE {isCommentaryEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+        </div>
+
+        {/* Top Center: Clean and Unobstructed Area (No floating buttons) */}
+        <div className="hidden md:flex items-center gap-2 px-4 py-1.5 rounded-full bg-slate-950/60 border border-slate-800 text-slate-300 text-xs font-mono font-bold tracking-widest uppercase shadow">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+          <span>3D WORLD ARENA LIVE</span>
+        </div>
+
+        {/* Top Right: Wallet & Active Arena Info */}
+        <div className="flex items-center gap-3">
+          {/* Wallet */}
+          <div className="h-10 px-3.5 rounded-xl bg-slate-900/90 border border-amber-500/60 text-amber-300 font-mono text-xs font-black flex items-center gap-2 shadow-lg">
+            <FourSquareCoin size={16} animate />
+            <span>{coins}</span>
+          </div>
+
+          {/* Active Arena */}
+          <button
+            onClick={() => {
+              soundFX.playClick();
+              onArenas();
+            }}
+            className="hidden md:flex h-10 px-3.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 border border-cyan-500/50 hover:border-cyan-400 text-cyan-300 font-mono text-xs font-bold items-center gap-2 shadow-lg cursor-pointer transition-all"
+            title="Change Venue Arena"
+          >
+            <Compass className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="max-w-[110px] truncate">{activeVenue.name}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* MIDDLE CONTENT AREA: ALL BUTTONS ON LEFT + CENTER HERO + ENTIRE RIGHT SIDE */}
+      {/* ========================================================================= */}
+      <div className="relative z-10 pointer-events-auto flex-1 flex flex-col md:flex-row items-center px-4 sm:px-8 py-2 overflow-hidden gap-6">
+        {/* ------------------------------------------------------------- */}
+        {/* COLUMN 1: ALL BUTTONS LIST ON LEFT (UNIFORM COLOR & STYLING)  */}
+        {/* ------------------------------------------------------------- */}
+        <div className="w-full md:w-[300px] lg:w-[340px] h-full max-h-[76vh] shrink-0 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-800 space-y-1.5 pr-2">
+          {menuOptions.map((opt) => {
+            const isSelected = opt.id === selectedId;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  soundFX.playClick();
+                  const now = performance.now();
+                  const prev = lastButtonClickRef.current;
+                  if (prev && prev.id === opt.id && now - prev.time < 420) {
+                    lastButtonClickRef.current = null;
+                    setSelectedId(opt.id);
+                    launchOption(opt);
+                    return;
+                  }
+                  lastButtonClickRef.current = { id: opt.id, time: now };
+                  setSelectedId(opt.id);
+                }}
+                onDoubleClick={() => {
+                  soundFX.playClick();
+                  setSelectedId(opt.id);
+                  launchOption(opt);
+                }}
+                className={`w-full text-left px-4 py-3 rounded-2xl transition-all cursor-pointer flex items-center justify-between group border ${
+                  isSelected
+                    ? 'bg-white/25 text-white font-black backdrop-blur-md shadow-xl border-l-8 border-l-amber-400 border-y-white/40 border-r-white/30 translate-x-1.5'
+                    : 'bg-slate-950/60 hover:bg-white/15 text-slate-200 hover:text-white border-slate-800/90 font-extrabold shadow-md'
+                }`}
+              >
+                <div className="flex items-center gap-3 truncate">
+                  <opt.icon className={`w-4 h-4 ${isSelected ? 'text-amber-400' : 'text-slate-400 group-hover:text-white'}`} />
+                  <span
+                    className={`text-sm sm:text-base tracking-wider uppercase font-black transition-colors ${
+                      isSelected ? 'text-white drop-shadow-[0_2px_8px_rgba(255,255,255,0.5)]' : 'text-slate-200 group-hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                  </span>
+                </div>
+
+                {opt.badge && (
+                  <span
+                    className={`text-[9px] font-mono px-2.5 py-0.5 rounded-full font-black uppercase tracking-tight shrink-0 ${
+                      isSelected ? 'bg-amber-400 text-slate-950 shadow' : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {opt.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ------------------------------------------------------------- */}
+        {/* COLUMN 2: CENTER HERO CARD                                     */}
+        {/* ------------------------------------------------------------- */}
+        <div className="flex-1 flex flex-col justify-center px-2 sm:px-8 py-4 max-w-2xl">
+          {/* FC Geometric Triangle Monogram Logo Icon */}
+          <div className="mb-3">
+            <div className="relative w-14 h-14 sm:w-16 sm:h-16 flex items-center justify-center">
+              <svg viewBox="0 0 100 100" className="w-full h-full text-white/90 drop-shadow-[0_4px_12px_rgba(255,255,255,0.4)]">
+                <polygon
+                  points="10,15 90,15 50,90"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="8"
+                  strokeLinejoin="round"
+                />
+                <polygon
+                  points="25,25 75,25 50,70"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                  strokeLinejoin="round"
+                />
+                <text
+                  x="50"
+                  y="46"
+                  textAnchor="middle"
+                  fill="currentColor"
+                  fontSize="20"
+                  fontFamily="sans-serif"
+                  fontWeight="900"
+                  fontStyle="italic"
+                >
+                  FS
+                </text>
+              </svg>
+            </div>
+          </div>
+
+          {/* Subtitle / Mode Title */}
+          <div className="space-y-2">
+            <h2 className="text-3xl sm:text-5xl font-black italic uppercase tracking-tight text-white drop-shadow-[0_3px_15px_rgba(0,0,0,0.8)]">
+              {selectedOption.subtitle}
+            </h2>
+
+            {/* Tagline */}
+            <p className="text-sm sm:text-base font-bold text-emerald-400 drop-shadow">
+              {selectedOption.description}
+            </p>
+          </div>
+
+          {/* Enter Action Button (Clean, no X badge) */}
+          <div className="mt-6 flex items-center gap-4">
+            <button
+              onClick={() => {
+                soundFX.playClick();
+                launchOption(selectedOption);
+              }}
+              onDoubleClick={() => {
+                soundFX.playClick();
+                launchOption(selectedOption);
+              }}
+              className="px-7 py-3 rounded-2xl bg-white/95 hover:bg-white text-slate-950 font-black text-sm uppercase tracking-wider shadow-[0_10px_25px_rgba(255,255,255,0.4)] flex items-center justify-center transition-all cursor-pointer hover:scale-105 active:scale-95 border-2 border-white whitespace-nowrap shrink-0"
+            >
+              <span className="text-slate-950 font-black tracking-tight text-base">Enter</span>
+            </button>
+
+            <span className="text-xs font-mono font-bold text-slate-300 hidden sm:inline">
+              Double click any menu button or click Enter to open
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ========================================================================= */}
+      {/* BOTTOM BRANDING STRIP: FS 27 LOGO & MUSIC CONTROLS                       */}
+      {/* ========================================================================= */}
+      <div className="relative z-20 pointer-events-auto flex items-center justify-between px-8 py-3 bg-gradient-to-t from-black/90 via-black/70 to-transparent">
+        {/* Left: Empty spacing to keep logo centered */}
+        <div className="w-24 hidden sm:block" />
+
+        {/* Center: FS SPORTS LOGO ("FS27") */}
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-full bg-slate-950 border-2 border-white/80 flex flex-col items-center justify-center text-[7px] font-black tracking-tighter text-white shadow-xl">
+            <span className="leading-none">FS</span>
+            <span className="text-[6px] text-amber-400 leading-none">SPORTS</span>
+          </div>
+          <div className="text-2xl sm:text-3xl font-black italic tracking-tighter text-white drop-shadow-[0_2px_10px_rgba(255,255,255,0.4)]">
+            FS<span className="text-blue-400">27</span>
+          </div>
+        </div>
+
+        {/* Right: Audio Player Mini Bar */}
+        <div className="flex items-center gap-3 bg-slate-950/90 border border-slate-800 px-3.5 py-1.5 rounded-xl shadow-xl">
+          <button
+            onClick={onToggleMusic}
+            className="p-1 hover:text-amber-400 transition-colors cursor-pointer text-slate-300"
+            title={isPlayingMusic ? 'Pause Music' : 'Play Music'}
+          >
+            {isPlayingMusic ? <Pause className="w-4 h-4 text-amber-400" /> : <PlayIcon className="w-4 h-4 fill-white" />}
+          </button>
+          <span className="max-w-[100px] truncate text-xs font-sans font-bold text-amber-300 hidden sm:inline">
+            {currentTrackName}
+          </span>
+          <button
+            onClick={onNextTrack}
+            className="p-1 hover:text-amber-400 transition-colors cursor-pointer text-slate-300"
+            title="Next Track"
+          >
+            <SkipForward className="w-4 h-4" />
           </button>
         </div>
       </div>
     </div>
   );
 };
+
+

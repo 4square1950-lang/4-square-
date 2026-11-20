@@ -67,7 +67,7 @@ import { FourSquareCoin } from './components/FourSquareCoin';
 import { MapPin, Navigation, Footprints, Globe, Zap, LogOut } from 'lucide-react';
 
 
-const SETTINGS_STORAGE_KEY = 'foursquare_game_settings_v1';
+const SETTINGS_STORAGE_KEY = 'foursquare_game_settings_v2';
 
 const INITIAL_SETTINGS: GameSettingsState = {
   enableSystemNotifications: true,
@@ -86,7 +86,7 @@ const INITIAL_SETTINGS: GameSettingsState = {
   crowdVolume: 70,
   enableVoiceCommentary: false,
 
-  cameraView: 'first_person',
+  cameraView: 'third_person',
   graphicsQuality: 'high',
   dustParticles: true,
   contactShadows: true,
@@ -124,8 +124,17 @@ export default function App() {
   // Settings State (loaded from localStorage with fallbacks)
   const [settings, setSettings] = useState<GameSettingsState>(() => {
     try {
-      const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
-      if (saved) return { ...INITIAL_SETTINGS, ...JSON.parse(saved) };
+      const savedV2 = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (savedV2) return { ...INITIAL_SETTINGS, ...JSON.parse(savedV2) };
+      const savedV1 = localStorage.getItem('foursquare_game_settings_v1');
+      if (savedV1) {
+        const parsed = JSON.parse(savedV1);
+        return {
+          ...INITIAL_SETTINGS,
+          ...parsed,
+          cameraView: parsed.cameraView === 'first_person' ? 'third_person' : (parsed.cameraView || 'third_person'),
+        };
+      }
     } catch {
       // fallback
     }
@@ -143,6 +152,19 @@ export default function App() {
       localStorage.setItem('foursquare_campaign_progress_v1', JSON.stringify(campaignProgress));
     } catch {}
   }, [campaignProgress]);
+
+  // Main Menu Video / Animation toggle (Always enabled by default for live 3D match action)
+  const [disableMenuVideo, setDisableMenuVideo] = useState<boolean>(false);
+
+  const handleToggleDisableMenuVideo = () => {
+    setDisableMenuVideo((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('foursquare_disable_menu_video', String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   // Save settings whenever updated and apply audio effects
   const handleUpdateSettings = (newSettings: GameSettingsState) => {
@@ -169,18 +191,18 @@ export default function App() {
   const [transitFromVenue, setTransitFromVenue] = useState<VenueDef>(currentVenue);
   const [transitToVenue, setTransitToVenue] = useState<VenueDef>(currentVenue);
 
-  // Helper to get stored exploration spawn position
+  // Helper to get stored exploration spawn position (defaults to backyard court behind school)
   const getInitialExplorationPos = (): [number, number, number] => {
     try {
       const saved = localStorage.getItem('foursquare_last_exploration_pos');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length === 3) {
+        if (Array.isArray(parsed) && parsed.length === 3 && typeof parsed[2] === 'number' && parsed[2] >= -46 && parsed[2] <= 21) {
           return parsed as [number, number, number];
         }
       }
     } catch {}
-    return [0, 0, -16.0]; // Open schoolyard gateway walking onto the blacktop!
+    return [0, 0, -6.2]; // Right behind Oakridge School overlooking the backyard Four Square courts!
   };
 
   // Player exploration position in 3D
@@ -621,9 +643,9 @@ export default function App() {
       currentVenueId: transitToVenue.id,
       unlockedVenues: Array.from(new Set([...prev.unlockedVenues, transitToVenue.id])),
     }));
-    // Arrive right at the school entrance gateway so player walks onto the scene!
+    // Arrive right at the front schoolyard entrance gateway so player can enter the school & head out back!
     setAppMode('campaign_exploration');
-    setExplorationPos([0, 0, -16.0]);
+    setExplorationPos([0, 0, -35.5]);
   };
 
   const handleEnterTournamentMatch = (opponentCharId: string, _opponentName: string, _roundLabel: string) => {
@@ -869,7 +891,7 @@ export default function App() {
     <div className="relative w-screen h-screen bg-slate-950 overflow-hidden font-sans select-none">
       {/* 3D WebGL Canvas Layer */}
       <ThreeCourtScene
-        key={`${appMode}-${matchVenueType}`}
+        key={`${appMode}-${currentVenue.id}-${matchVenueType}`}
         mode={
           appMode === 'main_menu'
             ? 'preview'
@@ -878,7 +900,13 @@ export default function App() {
             : 'match'
         }
         venue={currentVenue}
-        venueType={matchVenueType}
+        venueType={
+          currentVenue.courtSurface?.toLowerCase().includes('hardwood') ||
+          currentVenue.theme?.toLowerCase().includes('gym') ||
+          currentVenue.id === 'winter_rec_room'
+            ? 'indoor'
+            : matchVenueType
+        }
         players={gameState.players}
         waitingQueue={gameState.waitingQueue}
         ballState={gameState.ballState}
@@ -916,9 +944,10 @@ export default function App() {
         onToggleOrbitMode={() => setIsOrbitMode((prev) => !prev)}
         onShotClockExpired={handleShotClockExpired}
         paAnnouncement={paAnnouncement}
+        disableBackgroundVideo={disableMenuVideo}
       />
 
-      {/* Main Menu Overlay matching image.png (with live 3D court preview running in background) */}
+      {/* Main Menu Overlay matching FC27 format (with live 3D court preview running in background) */}
       {appMode === 'main_menu' && (
         <MainMenu
           coins={campaignProgress.coins}
@@ -946,6 +975,8 @@ export default function App() {
           currentTrackName={currentTrack}
           isCommentaryEnabled={settings.enableVoiceCommentary}
           onToggleCommentary={() => handleUpdateSettings({ ...settings, enableVoiceCommentary: !settings.enableVoiceCommentary })}
+          isMenuVideoDisabled={disableMenuVideo}
+          onToggleDisableMenuVideo={handleToggleDisableMenuVideo}
         />
       )}
 
@@ -1212,7 +1243,7 @@ export default function App() {
         onClose={() => setIsKingModalOpen(false)}
       />
 
-      {/* Online Multiplayer Lobby Modal */}
+      {/* Online Multiplayer Lobby Modal (includes Local Pass & Play) */}
       <OnlineMultiplayerModal
         isOpen={isOnlineMultiplayerOpen}
         onClose={() => setIsOnlineMultiplayerOpen(false)}
@@ -1221,6 +1252,7 @@ export default function App() {
           setAppMode('match');
           setGameState(createInitialState(settings.defaultRuleSet));
         }}
+        onStartLocalMatch={handleStartLocalMatch}
       />
 
       {/* Local Pass & Play Multiplayer Modal */}
