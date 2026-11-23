@@ -1,7 +1,17 @@
+import { campusCollectibles } from '../services/collectibles';
+import { readGamepad, stickAxis } from '../services/gamepad';
+import { buildCampusAnnex, buildCampusCrowd, buildSchoolUpperFloor } from '../utils/campusAnnex';
+import { animateCampusTeacher, buildCampusRooms, EAST_OPENING, LIBRARY_READ_SPOT, poseCampusStudent, STUDY_SEAT } from '../utils/campusRooms';
+import { SchoolBookReader } from './SchoolBookReader';
+import { trafficTravel } from '../utils/trafficCollision';
+import type { CourtWeather } from '../services/soloSetup';
+import type { BallLook } from '../services/ballCatalog';
+import { courtBallMaterial } from '../utils/courtBall';
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Timer, Volume2 } from 'lucide-react';
-import { Player, BallState, SquareId, RuleSet } from '../types/foursquare';
+import { Player, BallState, SquareId, RuleSet, RefereeCall } from '../types/foursquare';
+import { DIVE_STEP, STRIKE_STEP } from '../services/returnReach';
 import { VenueDef, CampaignNPC } from '../types/campaign';
 import { SQUARE_CONFIGS, COURT_HALF_SIZE, LINE_HALF_WIDTH } from '../utils/courtGeometry';
 import { CHARACTERS, CharacterDef, CharacterCustomization } from '../utils/characters';
@@ -17,7 +27,15 @@ import {
 } from '../utils/characterModelBuilder';
 import { globalPhysics } from '../utils/physicsEngine';
 import { soundFX } from '../services/soundEffects';
+import { serveContactPosition } from '../services/foursquareEngine';
+import { fitMatchCamera } from '../utils/matchCamera';
 import { ClassroomModal } from './ClassroomModal';
+import { buildCampusCourt, buildCampusExterior, disposeCampus } from '../utils/campusScene';
+import { campusNpcSpot, campusPerimeter, campusPlayground, campusTrees, campusWalls, FUNNEL_POSITION, getCampusElevation, getCampusLayout, SCHOOL, SCHOOL_LIFT, SCHOOL_UPPER, campusYardFence } from '../utils/campusLayout';
+
+const STRIKE_PHASE = 0.23;
+const STRIKE_DURATION = 0.30;
+const BALL_RADIUS = 0.22;
 
 function createSafeCanvasTexture(
   width: number,
@@ -38,16 +56,29 @@ function createSafeCanvasTexture(
 
 interface ThreeCourtSceneProps {
   mode?: 'match' | 'exploration' | 'preview';
+  manualFootwork?: boolean;
+  assistFootwork?: boolean;
+  clickDrillMarkerToMove?: boolean;
+  drillMarker?: {x:number;z:number};
+  captureFrameRef?: React.RefObject<(() => Promise<Blob | null>) | null>;
+  paused?: boolean;
+  weather?: CourtWeather;
+  ballLook?: BallLook;
+  onControlledPose?: (pose: { id: string; x: number; z: number; reaching: boolean }) => void;
   venue?: VenueDef;
   players: Player[];
   waitingQueue: Player[];
   ballState: BallState;
+  refereeCall?: RefereeCall;
+  matchFinished?: boolean;
   humanPlayerId: string;
   activeTurnPlayerId: string | null;
   servingPlayerId: string | null;
   isHumanTurn: boolean;
   highlightedSquares: SquareId[];
-  onSelectTargetSquare: (squareId: SquareId, clickPoint?: { x: number; z: number }) => void;
+  onSelectTargetSquare: (squareId: SquareId, clickPoint?: { x: number; z: number }, fast?: boolean) => void;
+  onMatchIntroChange?: (active: boolean) => void;
+  skipMatchIntro?: boolean;
   cameraView: 'first_person' | 'third_person' | 'isometric' | 'top_down' | 'action';
   ruleSet?: RuleSet;
   explorationPlayerPos?: [number, number, number];
@@ -57,27 +88,45 @@ interface ThreeCourtSceneProps {
   onInteractFunnelBall?: () => void;
   onInteractSchoolDoor?: () => void;
   onRewardCoins?: (amount: number) => void;
-  onStartMatchWithClassmate?: (classmate?: CharacterDef) => void;
+  completedLessons?:string[];
+  collectedItems?: readonly string[];
+  onCollectItem?: (id: string, name: string) => void;
+  onPassLesson?:(id:string,coins:number)=>void;
   customization?: CharacterCustomization;
   isOrbitMode?: boolean;
   onToggleOrbitMode?: () => void;
   venueType?: 'outdoor' | 'indoor';
   onShotClockExpired?: () => void;
+  serveDeadline?: number;
   paAnnouncement?: string | null;
   disableBackgroundVideo?: boolean;
+  covered?: boolean;
 }
 
 export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   mode = 'match',
+  manualFootwork = false,
+  assistFootwork = true,
+  drillMarker,
+  clickDrillMarkerToMove = false,
+  captureFrameRef,
+  paused = false,
+  weather = 'Clear',
+  ballLook,
+  onControlledPose,
   venue,
   players,
   ballState,
+  refereeCall,
+  matchFinished = false,
   humanPlayerId,
   activeTurnPlayerId,
   servingPlayerId,
   isHumanTurn,
   highlightedSquares,
   onSelectTargetSquare,
+  onMatchIntroChange,
+  skipMatchIntro = false,
   cameraView,
   explorationPlayerPos = [0, 0, -6.0],
   onExplorationMove,
@@ -86,19 +135,32 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   onInteractFunnelBall,
   onInteractSchoolDoor,
   onRewardCoins,
-  onStartMatchWithClassmate,
+  completedLessons,
+  collectedItems,
+  onCollectItem,
+  onPassLesson,
   customization,
   isOrbitMode,
   onToggleOrbitMode,
   venueType = 'outdoor',
   onShotClockExpired,
+  serveDeadline,
   paAnnouncement,
   disableBackgroundVideo = false,
+  covered = false,
 }) => {
+  const reportPose=useRef(onControlledPose);
+  reportPose.current=onControlledPose;
+  const followDrillMarker=useRef(false);
+  useEffect(()=>{followDrillMarker.current=false;},[drillMarker]);
+  const currentDrillMarker=useRef(drillMarker);
+  currentDrillMarker.current=drillMarker;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasMountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const collection = useRef({ collectedItems, onCollectItem });
+  collection.current = { collectedItems, onCollectItem };
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
@@ -114,8 +176,14 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   const refereeMeshRef = useRef<THREE.Group | null>(null);
   const spectatorsRef = useRef<THREE.Group[]>([]);
   const npcsRef = useRef<THREE.Group[]>([]);
-  const [locomotionMode, setLocomotionMode] = useState<'walk' | 'run' | 'bike'>('run');
+  const cyclingRef = useRef(false);
   const [isClassroomOpen, setIsClassroomOpen] = useState(false);
+  const [bookIndex,setBookIndex] = useState<number>();
+  const [seated,setSeated] = useState(false);
+  const seatedRef=useRef(false);
+  seatedRef.current=seated;
+  const lessonVisible=useRef(false);
+  lessonVisible.current=isClassroomOpen || bookIndex!==undefined;
   const gymDoorsRef = useRef<{ left: THREE.Group; right: THREE.Group } | null>(null);
   const streetVehiclesRef = useRef<{
     mesh: THREE.Group;
@@ -136,12 +204,11 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     Map<
       string,
       {
-        startTime: number;
-        duration: number;
-        hitterId: string;
+        elapsed: number;
         contactPos: THREE.Vector3;
-        shotDirX: number;
-        shotDirZ: number;
+        rank: SquareId;
+        plantLimit: number;
+        plantStep?: { startX: number; startZ: number; endX: number; endZ: number };
       }
     >
   >(new Map());
@@ -163,29 +230,35 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   activeOrbitRef.current = activeOrbit;
 
   const isDraggingRef = useRef(false);
+  const orbitGesture = useRef<{ id: number; x: number; y: number } | undefined>(undefined);
   const lastPointerPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const orbitYawRef = useRef(0);
+  const orbitYawRef = useRef(explorationPlayerPos[2] < SCHOOL.front ? Math.PI : 0);
   const orbitPitchRef = useRef(0.24);
   const orbitDistanceRef = useRef(7.5); // Smooth zoomable distance between 4.0m and 26.0m
   const matchZoomRef = useRef(1.0); // Match zoom multiplier (scroll wheel adjustable)
 
   // 10-Second Skippable Scene-Setting Match Intro Zoom State
-  const [isMatchIntroActive, setIsMatchIntroActive] = useState(mode === 'match');
-  const isMatchIntroActiveRef = useRef(mode === 'match');
+  const [isMatchIntroActive, setIsMatchIntroActive] = useState(mode === 'match' && !skipMatchIntro);
+  useEffect(() => {
+    onMatchIntroChange?.(mode === 'match' && isMatchIntroActive);
+  }, [mode, isMatchIntroActive, onMatchIntroChange]);
+  const isMatchIntroActiveRef = useRef(mode === 'match' && !skipMatchIntro);
   const matchIntroStartTimeRef = useRef(performance.now());
-  const [introCountdown, setIntroCountdown] = useState(10);
+  const [introCountdown, setIntroCountdown] = useState(4);
 
   // 5-Second Turn Shot Clock
   const [shotClockSeconds, setShotClockSeconds] = useState(5.0);
   const shotClockRef = useRef(5.0);
   const onShotClockExpiredRef = useRef(onShotClockExpired);
   onShotClockExpiredRef.current = onShotClockExpired;
+  const deadlineRef = useRef(serveDeadline);
+  deadlineRef.current = serveDeadline;
 
   // Reset shot clock on turn change or serve change
   useEffect(() => {
     shotClockRef.current = 5.0;
-    setShotClockSeconds(5.0);
-  }, [activeTurnPlayerId, ballState.isServing]);
+    setShotClockSeconds(serveDeadline ? Math.max(0, (serveDeadline - Date.now()) / 1000) : 5);
+  }, [activeTurnPlayerId, ballState.isServing, serveDeadline, refereeCall?.timestamp]);
 
   const skipIntro = () => {
     isMatchIntroActiveRef.current = false;
@@ -214,22 +287,22 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
   // Restart intro zoom whenever entering match mode
   useEffect(() => {
-    if (mode === 'match') {
+    if (mode === 'match' && !skipMatchIntro) {
       setIsMatchIntroActive(true);
       isMatchIntroActiveRef.current = true;
       matchIntroStartTimeRef.current = performance.now();
-      setIntroCountdown(10);
+      setIntroCountdown(4);
     } else {
       setIsMatchIntroActive(false);
       isMatchIntroActiveRef.current = false;
     }
-  }, [mode]);
+  }, [mode, skipMatchIntro]);
 
   // Countdown timer for intro HUD
   useEffect(() => {
     if (!isMatchIntroActive) return;
     const interval = setInterval(() => {
-      const remaining = Math.max(0, 10 - Math.floor((performance.now() - matchIntroStartTimeRef.current) / 1000));
+      const remaining = Math.max(0, Math.ceil((4000 - performance.now() + matchIntroStartTimeRef.current) / 1000));
       setIntroCountdown(remaining);
       if (remaining <= 0) {
         setIsMatchIntroActive(false);
@@ -276,6 +349,8 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
   const ballStateRef = useRef(ballState);
   ballStateRef.current = ballState;
+  const refereeState = useRef({ call: refereeCall, finished: matchFinished });
+  refereeState.current = { call: refereeCall, finished: matchFinished };
 
   const humanPlayerIdRef = useRef(humanPlayerId);
   humanPlayerIdRef.current = humanPlayerId;
@@ -286,10 +361,12 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   const servingPlayerIdRef = useRef(servingPlayerId);
   servingPlayerIdRef.current = servingPlayerId;
 
-  const locomotionModeRef = useRef(locomotionMode);
-  locomotionModeRef.current = locomotionMode;
 
   const disableBackgroundVideoRef = useRef(disableBackgroundVideo);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+  const coveredRef = useRef(covered);
+  coveredRef.current = covered;
   useEffect(() => {
     disableBackgroundVideoRef.current = disableBackgroundVideo;
   }, [disableBackgroundVideo]);
@@ -337,11 +414,28 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   // Keyboard navigation for exploration
   const keysPressed = useRef<{ [key: string]: boolean }>({});
   const localPlayerPos = useRef<[number, number, number]>([...explorationPlayerPos]);
+  const liftJourney = useRef<{ from: number; to: number; elapsed: number } | null>(null);
+  const occupyDesk = (sit:boolean) => {
+    const position:[number,number,number] = [STUDY_SEAT.x+(sit?0:1.02),0,STUDY_SEAT.z];
+    localPlayerPos.current=position;
+    targetMovePosRef.current=null;
+    if (explorerMeshRef.current) {
+      explorerMeshRef.current.position.set(position[0],0,position[2]);
+      explorerMeshRef.current.rotation.y=0;
+      if (!sit) for (const limb of ['leftLeg','rightLeg','leftShin','rightShin','leftArm','rightArm','headMesh']) {
+        explorerMeshRef.current.getObjectByName(limb)?.rotation.set(0,0,0);
+      }
+    }
+    globalPhysics.updateCylinderPos('player-explorer',position[0],position[2]);
+    onExplorationMoveRef.current?.(position);
+    setSeated(sit);
+    setInteractionPrompt(sit?{text:'Stand up [E]',action:()=>occupyDesk(false)}:null);
+  };
 
   useEffect(() => {
     localPlayerPos.current = [...explorationPlayerPos];
     if (explorerMeshRef.current) {
-      explorerMeshRef.current.position.set(explorationPlayerPos[0], 0, explorationPlayerPos[2]);
+      explorerMeshRef.current.position.set(...explorationPlayerPos);
     }
   }, [explorationPlayerPos]);
 
@@ -349,13 +443,15 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
+      if ((e.target as HTMLElement | null)?.closest('input,textarea,select,[contenteditable]')) return;
       keysPressed.current[k] = true;
+      if (e.code === 'KeyB' && !e.repeat && modeRef.current === 'exploration') cyclingRef.current = !cyclingRef.current;
       if (e.code === 'KeyW' || e.code === 'ArrowUp') keysPressed.current['w'] = true;
       if (e.code === 'KeyS' || e.code === 'ArrowDown') keysPressed.current['s'] = true;
       if (e.code === 'KeyA' || e.code === 'ArrowLeft') keysPressed.current['a'] = true;
       if (e.code === 'KeyD' || e.code === 'ArrowRight') keysPressed.current['d'] = true;
 
-      if ((k === 'e' || e.code === 'KeyE' || e.code === 'Space') && interactionPromptRef.current) {
+      if (!pausedRef.current && !coveredRef.current && !lessonVisible.current && !e.repeat && (k === 'e' || e.code === 'KeyE' || e.code === 'Space') && interactionPromptRef.current) {
         interactionPromptRef.current.action();
       }
     };
@@ -395,19 +491,39 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     sceneRef.current = scene;
 
     const isIndoorVenue = venueType === 'indoor';
-    scene.background = new THREE.Color(isIndoorVenue ? '#070d18' : '#38bdf8');
+    scene.background = new THREE.Color(isIndoorVenue ? '#070d18' : '#a2b7c1');
     scene.fog = isIndoorVenue ? new THREE.FogExp2('#070d18', 0.003) : new THREE.FogExp2('#38bdf8', 0.007);
+    const clouded = !isIndoorVenue && weather !== 'Clear';
+    if (clouded) {
+      const sky = weather === 'Rain' ? '#596e76' : weather === 'Fog' || weather==='Snow' ? '#b9c3bd' : '#8b9ca1';
+      scene.background = new THREE.Color(sky);
+      scene.fog = new THREE.FogExp2(sky, weather === 'Fog' ? .039 : .014);
+    }
+    const snowfall = weather==='Snow';
+    const rainLines = !isIndoorVenue && (weather === 'Rain' || snowfall) ? new Float32Array(500 * 6) : undefined;
+    const rain = rainLines ? new THREE.LineSegments(new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({ color: 0xd1e7ef, transparent: true, opacity: .34, depthWrite: false })) : undefined;
+    if (rain && rainLines) {
+      for (let i = 0; i < rainLines.length; i += 6) {
+        rainLines[i] = (Math.random() - .5) * 60;
+        rainLines[i + 1] = Math.random() * 18;
+        rainLines[i + 2] = (Math.random() - .5) * 60;
+      }
+      rain.geometry.setAttribute('position', new THREE.BufferAttribute(rainLines, 3));
+      rain.frustumCulled = false;
+      scene.add(rain);
+    }
 
     // Camera setup
     const aspect = height > 0 ? width / height : 1.33;
-    const camera = new THREE.PerspectiveCamera(50, aspect, 0.5, 220);
+    const camera = new THREE.PerspectiveCamera(50, aspect, 0.12, 260);
     cameraRef.current = camera;
     if (mode === 'match' && isIndoorVenue) {
       // Start in entrance hallway foyer facing the closed double doors to the gymnasium
       camera.position.set(0, 2.0, 23.0);
       camera.lookAt(0, 2.1, 14.5);
     } else if (mode === 'preview') {
-      camera.position.set(2.4, 7.8, 10.2);
+      camera.position.set(6.5, 3.6, 9.2);
       camera.lookAt(0.6, 0.4, 0.0);
     } else {
       updateCameraPosition(camera, cameraView, mode, localPlayerPos.current, venueType, matchZoomRef.current);
@@ -428,7 +544,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     rendererRef.current = renderer;
     mountNode.innerHTML = '';
     mountNode.appendChild(renderer.domElement);
@@ -456,7 +572,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       const ambientLight = new THREE.AmbientLight(0xffffff, 0.95);
       scene.add(ambientLight);
 
-      const sunLight = new THREE.DirectionalLight(0xfffaed, 1.6);
+      const sunLight = new THREE.DirectionalLight(clouded ? 0xd5e2e7 : 0xfffaed, clouded ? .65 : 1.6);
       sunLight.position.set(18, 30, 22);
       sunLight.castShadow = true;
       sunLight.shadow.mapSize.width = 2048;
@@ -476,16 +592,50 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     }
 
     // Register Static Object Colliders in Physics Engine
-    setupStaticColliders();
+    if (!isIndoorVenue) setupStaticColliders(venue?.id);
 
     // Build Schoolyard Environment with Enterable School Building or Indoor Gymnasium
-    buildVenueEnvironment(scene, venue, refereeMeshRef, spectatorsRef, npcsRef, streetVehiclesRef, venueType, gymDoorsRef);
+    buildVenueEnvironment(scene, venue, refereeMeshRef, spectatorsRef, npcsRef, streetVehiclesRef, venueType, gymDoorsRef, mode === 'exploration');
+    const teacher = scene.getObjectByName('campusTeacher');
+    const collectibles = mode === 'exploration' && venue && onCollectItem ? campusCollectibles(venue.id).map((item) => {
+      const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(.23,0), new THREE.MeshStandardMaterial({ color:item.color, emissive:item.color, emissiveIntensity:.35, metalness:.45 }));
+      mesh.position.set(item.x,.44,item.z);
+      scene.add(mesh);
+      return {mesh,item};
+    }) : [];
+    const crowd = scene.getObjectByName('campusCrowd');
+    const liftPlatform = scene.getObjectByName('schoolLiftPlatform');
+    let lastCrowdFrame = -1;
+    const students:THREE.Object3D[]=[];
+    scene.traverse((object)=>{if(typeof object.userData.studyIndex==='number')students.push(object);});
+    const cameraAnchor = new THREE.Vector3();
+    const cameraDirection = new THREE.Vector3();
+    const marker = new THREE.Mesh(new THREE.TorusGeometry(.51,.045,8,32), new THREE.MeshBasicMaterial({color:0xffd081}));
+    marker.rotation.x=-Math.PI/2;
+    marker.visible=false;
+    scene.add(marker);
+    const cameraRay = new THREE.Raycaster();
+    const cameraWalls: THREE.Object3D[] = [];
+    scene.traverse((object) => {
+      if (object instanceof THREE.Mesh && (object.userData.cameraWall || object.name === 'classroomFloor' || object.name === 'schoolFloor')) cameraWalls.push(object);
+    });
 
     // Build Four Square Court
-    buildCourt(scene, squareMeshesRef, squareHighlightsRef);
+    const court = buildCourt(scene, squareMeshesRef, squareHighlightsRef, isIndoorVenue ? undefined : venue?.id);
+    if (rain) {
+      squareMeshesRef.current.forEach(({ material }) => {
+        if (material instanceof THREE.MeshStandardMaterial) {
+          material.color.multiplyScalar(.74);
+          material.roughness = .54;
+        }
+      });
+    }
 
     // Build Ball and ground shadow
-    buildBall(scene, ballMeshRef, ballShadowMeshRef);
+    buildBall(scene, ballMeshRef, ballShadowMeshRef, ballLook);
+    if (mode === 'exploration') {
+      globalPhysics.addCylinder({ id:'campus-court-ball',type:'object',x:3.4,z:2.4,radius:.22,height:.44,isStatic:true });
+    }
 
     // Build Hover Reticle
     const reticleGeo = new THREE.RingGeometry(0.35, 0.45, 32);
@@ -503,7 +653,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
     // Build Exploration Avatar
     const explorer = buildCharacterMesh(CHARACTERS[0], customization);
-    explorer.position.set(localPlayerPos.current[0], 0, localPlayerPos.current[2]);
+    explorer.position.set(...localPlayerPos.current);
     explorer.visible = mode === 'exploration';
     scene.add(explorer);
     explorerMeshRef.current = explorer;
@@ -523,25 +673,104 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     let animId: number;
     let clock = new THREE.Clock();
 
+    let controllerInteract = false;
+    let baselineX = 0;
+    let lastCallKey = '';
+    let lastBounceKey = '';
+    let signal: 'serve' | 'in' | 'replay' | 'out' | 'end' = 'serve';
+    let signalSquare: SquareId = 4;
+    let signalStarted = -10;
+    let crowdStarted = -10;
+    if (captureFrameRef) captureFrameRef.current = () => new Promise((resolve) => {
+      renderer.render(scene, camera);
+      renderer.domElement.toBlob(resolve, 'image/png');
+    });
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const delta = Math.min(clock.getDelta(), 0.1);
       const elapsed = clock.getElapsedTime();
 
+      const targetMarker=currentDrillMarker.current;
+      marker.visible=Boolean(targetMarker);
+      if(targetMarker)marker.position.set(targetMarker.x,.052,targetMarker.z);
       const currentMode = modeRef.current;
-      const currentCamView = cameraViewRef.current;
+      const pad = document.hasFocus() ? readGamepad() : undefined;
+      const interact = !!pad?.buttons[0]?.pressed;
+      const interactPressed = interact && !controllerInteract;
+      controllerInteract = interact;
+      const stickX = stickAxis(pad, 0), stickZ = stickAxis(pad, 1);
+      if (pausedRef.current || (coveredRef.current && (currentMode === 'preview' || currentMode === 'exploration')) ||
+        (currentMode === 'preview' && disableBackgroundVideoRef.current)) return;
+      if (rain && rainLines) {
+        for (let i = 0; i < rainLines.length; i += 6) {
+          rainLines[i + 1] = (18 + rainLines[i + 1] - delta * (snowfall?2.1:14)) % 18;
+          rainLines[i + 3] = rainLines[i] - .12;
+          rainLines[i + 4] = rainLines[i + 1] - (snowfall?.055:.48);
+          rainLines[i + 5] = rainLines[i + 2] + .056;
+        }
+        rain.geometry.attributes.position.needsUpdate = true;
+      }
+      const currentCamView = currentMode === 'exploration' && activeOrbitRef.current ? 'third_person' : cameraViewRef.current;
+
+      if (currentMode === 'exploration') {
+        if (interactPressed && !lessonVisible.current) interactionPromptRef.current?.action();
+        orbitYawRef.current -= stickAxis(pad, 2) * delta * 2.1;
+        orbitPitchRef.current = THREE.MathUtils.clamp(orbitPitchRef.current - stickAxis(pad, 3) * delta * 1.5, -.38, 1.27);
+        for (const [index,{mesh,item}] of collectibles.entries()) {
+          mesh.visible = !collection.current.collectedItems?.includes(item.id);
+          mesh.rotation.y = elapsed*1.3+index;
+          mesh.position.y = .44+Math.sin(elapsed*2.3+index)*.075;
+        }
+        animateCampusTeacher(teacher, elapsed);
+        const crowdFrame = Math.floor(elapsed * 24);
+        if (crowd && lastCrowdFrame !== crowdFrame) {
+          crowd.userData.update(elapsed);
+          lastCrowdFrame = crowdFrame;
+        }
+        students.forEach((student)=>poseCampusStudent(student,elapsed,student.userData.studyIndex));
+        if (seatedRef.current && explorerMeshRef.current) {
+          explorerMeshRef.current.position.y=-.035;
+          poseCampusStudent(explorerMeshRef.current,elapsed,2);
+          renderer.render(scene,camera);
+          return;
+        }
+        if (lessonVisible.current) { renderer.render(scene,camera);return; }
+      }
 
       // Update 5-Second Shot Clock during active match turn
-      if (currentMode === 'match' && !isMatchIntroActiveRef.current && activeTurnPlayerIdRef.current) {
-        shotClockRef.current = Math.max(0, shotClockRef.current - delta);
+      if ((onShotClockExpiredRef.current || deadlineRef.current) && currentMode === 'match' && !isMatchIntroActiveRef.current &&
+          !refereeState.current.finished && ballStateRef.current.isServing && activeTurnPlayerIdRef.current) {
+        shotClockRef.current = deadlineRef.current ? Math.max(0, (deadlineRef.current - Date.now()) / 1000) :
+          Math.max(0, shotClockRef.current - delta);
         setShotClockSeconds(Math.ceil(shotClockRef.current * 10) / 10);
-        if (shotClockRef.current <= 0) {
+        if (shotClockRef.current <= 0 && !deadlineRef.current) {
           shotClockRef.current = 5.0;
-          soundFX.playShotClockBuzzer();
           if (onShotClockExpiredRef.current) {
             onShotClockExpiredRef.current();
           }
         }
+      }
+
+      if (currentMode === 'exploration' && explorerMeshRef.current && liftJourney.current) {
+        const travel = liftJourney.current;
+        travel.elapsed += delta;
+        const fraction = THREE.MathUtils.smoothstep(travel.elapsed, 0, 1.55);
+        const y = THREE.MathUtils.lerp(travel.from, travel.to, fraction);
+        const dy = y - localPlayerPos.current[1];
+        localPlayerPos.current = [SCHOOL_LIFT.x, y, SCHOOL_LIFT.z];
+        explorerMeshRef.current.position.set(...localPlayerPos.current);
+        if (liftPlatform) liftPlatform.position.y = y + .036;
+        if (cameraRef.current) {
+          cameraRef.current.position.y += dy;
+          cameraRef.current.lookAt(SCHOOL_LIFT.x, y + 1.2, SCHOOL_LIFT.z);
+        }
+        if (fraction === 1) {
+          liftJourney.current = null;
+          onExplorationMoveRef.current?.(localPlayerPos.current);
+          checkProximityPrompts(localPlayerPos.current);
+        }
+        renderer.render(scene, camera);
+        return;
       }
 
       // 1. Exploration Free-Roam Physics & Camera-Relative WASD Movement
@@ -549,13 +778,13 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         // In first person mode, hide avatar mesh so it doesn't obstruct camera view
         explorerMeshRef.current.visible = currentCamView !== 'first_person';
 
-        const activeLocomotion = locomotionModeRef.current;
+        const activeLocomotion = cyclingRef.current ? 'bike' : (keysPressed.current.shift || pad?.buttons[10]?.pressed) ? 'run' : 'walk';
         const baseSpeed = activeLocomotion === 'walk' ? 4.5 : activeLocomotion === 'bike' ? 14.0 : 8.5;
         const speed = baseSpeed * delta;
         let moveX = 0;
         let moveZ = 0;
 
-        const isKeyActive =
+        const isKeyActive = stickX || stickZ ||
           keysPressed.current['w'] ||
           keysPressed.current['arrowup'] ||
           keysPressed.current['s'] ||
@@ -574,6 +803,8 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           const fwdZ = -Math.cos(yaw);
           const rightX = Math.cos(yaw);
           const rightZ = -Math.sin(yaw);
+          moveX = (stickX * rightX - stickZ * fwdX) * speed;
+          moveZ = (stickX * rightZ - stickZ * fwdZ) * speed;
 
           // W / Up: Forward in camera view
           if (keysPressed.current['w'] || keysPressed.current['arrowup']) {
@@ -627,14 +858,16 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             'player-explorer',
             rawX,
             rawZ,
-            0.45
+            0.45,
+            localPlayerPos.current[1]
           );
 
-          localPlayerPos.current = [resolvedX, 0, resolvedZ];
-          explorerMeshRef.current.position.set(resolvedX, 0, resolvedZ);
+          const elevation = getCampusElevation(localPlayerPos.current[1], resolvedX, resolvedZ);
+          localPlayerPos.current = [resolvedX, elevation, resolvedZ];
+          explorerMeshRef.current.position.set(...localPlayerPos.current);
 
           // Walking body bobbing & limb gait cycle (Arms & Legs swinging)
-          explorerMeshRef.current.position.y = Math.abs(Math.sin(elapsed * 12)) * 0.08;
+          explorerMeshRef.current.position.y = elevation + Math.abs(Math.sin(elapsed * 12)) * 0.08;
 
           const leftArm = explorerMeshRef.current.getObjectByName('leftArm') as THREE.Group;
           const rightArm = explorerMeshRef.current.getObjectByName('rightArm') as THREE.Group;
@@ -648,12 +881,12 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           if (rightLeg) rightLeg.rotation.x = walkGait * 0.6;
 
           if (onExplorationMoveRef.current) {
-            onExplorationMoveRef.current([resolvedX, 0, resolvedZ]);
+            onExplorationMoveRef.current(localPlayerPos.current);
           }
 
           checkProximityPrompts(localPlayerPos.current);
         } else {
-          explorerMeshRef.current.position.y = 0;
+          explorerMeshRef.current.position.y = localPlayerPos.current[1];
           // Lerp limbs back to natural standing stance
           const leftArm = explorerMeshRef.current.getObjectByName('leftArm') as THREE.Group;
           const rightArm = explorerMeshRef.current.getObjectByName('rightArm') as THREE.Group;
@@ -668,14 +901,13 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
         // Camera Tracking with Live View & Right-Click Orbit Rotation
         if (cameraRef.current) {
-          const px = localPlayerPos.current[0];
-          const pz = localPlayerPos.current[2];
+          const [px, py, pz] = localPlayerPos.current;
           const yaw = orbitYawRef.current;
           const pitch = orbitPitchRef.current;
 
           if (currentCamView === 'first_person') {
             // First Person: Camera placed right at avatar's eye height
-            const eyeY = 1.55 + (isMoving ? Math.sin(elapsed * 12) * 0.04 : 0);
+            const eyeY = py + 1.55 + (isMoving ? Math.sin(elapsed * 12) * 0.04 : 0);
             cameraRef.current.position.set(px, eyeY, pz);
             cameraRef.current.lookAt(
               px - Math.sin(yaw) * 12,
@@ -688,32 +920,34 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             const yaw = orbitYawRef.current;
             const pitch = orbitPitchRef.current;
 
-            const targetCamX = px + Math.sin(yaw) * Math.cos(pitch) * dist;
-            const targetCamY = Math.max(1.2, 1.4 + Math.sin(pitch) * dist);
-            const targetCamZ = pz + Math.cos(yaw) * Math.cos(pitch) * dist;
-
-            cameraRef.current.position.x = THREE.MathUtils.lerp(cameraRef.current.position.x, targetCamX, 0.14);
-            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, targetCamY, 0.14);
-            cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetCamZ, 0.14);
-            cameraRef.current.lookAt(px, 1.2, pz);
+            cameraAnchor.set(px, py + 1.36, pz);
+            cameraDirection.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)).normalize();
+            cameraRay.set(cameraAnchor, cameraDirection);
+            cameraRay.far = dist;
+            const wall = cameraRay.intersectObjects(cameraWalls, false)[0];
+            const clear = wall ? Math.max(0.21, wall.distance - 0.40) : dist;
+            explorerMeshRef.current.visible = clear > .85;
+            cameraRef.current.position.copy(cameraAnchor).addScaledVector(cameraDirection, clear);
+            cameraRef.current.position.y = Math.max(py + .25, cameraRef.current.position.y);
+            cameraRef.current.lookAt(px, py + 1.2, pz);
           } else if (currentCamView === 'top_down') {
             // Top Down: Overhead bird's eye
             cameraRef.current.position.x = THREE.MathUtils.lerp(cameraRef.current.position.x, px, 0.15);
-            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, 18.0, 0.15);
+            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, py + 18.0, 0.15);
             cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, pz + 0.1, 0.15);
-            cameraRef.current.lookAt(px, 0, pz);
+            cameraRef.current.lookAt(px, py, pz);
           } else if (currentCamView === 'action') {
             // Action Cam: Low dynamic angle
             cameraRef.current.position.x = THREE.MathUtils.lerp(cameraRef.current.position.x, px + 3.2, 0.12);
-            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, 2.2, 0.12);
+            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, py + 2.2, 0.12);
             cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, pz + 4.2, 0.12);
-            cameraRef.current.lookAt(px, 0.8, pz);
+            cameraRef.current.lookAt(px, py + 0.8, pz);
           } else {
             // Isometric view
             cameraRef.current.position.x = THREE.MathUtils.lerp(cameraRef.current.position.x, px + 7.5, 0.12);
-            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, 9.5, 0.12);
+            cameraRef.current.position.y = THREE.MathUtils.lerp(cameraRef.current.position.y, py + 9.5, 0.12);
             cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, pz + 9.5, 0.12);
-            cameraRef.current.lookAt(px, 0.8, pz);
+            cameraRef.current.lookAt(px, py + 0.8, pz);
           }
         }
       }
@@ -722,7 +956,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       if (currentMode === 'preview' && ballMeshRef.current && ballShadowMeshRef.current) {
         const sim = previewSimRef.current;
         const now = performance.now();
-        const progress = (now - sim.shotStartTime) / sim.shotDuration;
+        const progress = Math.max(0, (now - sim.shotStartTime) / sim.shotDuration);
         const livePlayers = playersRef.current;
 
         if (progress >= 1.0) {
@@ -730,14 +964,11 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           sim.currentHitterSq = sim.targetSq;
           const remainingSquares: SquareId[] = ([1, 2, 3, 4] as SquareId[]).filter((s) => s !== sim.currentHitterSq);
           sim.targetSq = remainingSquares[Math.floor(Math.random() * remainingSquares.length)];
-          sim.shotStartTime = now;
+          sim.shotStartTime = now + STRIKE_PHASE * STRIKE_DURATION * 1000;
           sim.shotDuration = 820 + Math.random() * 240;
           sim.rallyCount++;
 
           const hitterPlayer = livePlayers.find((p) => p.rank === sim.currentHitterSq);
-          const hitterMesh = hitterPlayer ? playerMeshesRef.current.get(hitterPlayer.id) : undefined;
-          const hitOriginX = hitterMesh ? hitterMesh.position.x : sim.targetPos.x;
-          const hitOriginZ = hitterMesh ? hitterMesh.position.z : sim.targetPos.z;
           const nextSqCenter = SQUARE_CONFIGS[sim.targetSq].center;
           const nextDestX = nextSqCenter[0] + (Math.random() - 0.5) * 1.4;
           const nextDestZ = nextSqCenter[1] + (Math.random() - 0.5) * 1.4;
@@ -751,23 +982,17 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           sim.peakHeight = 1.25 + Math.random() * 0.65;
 
           // Trigger hand-to-ball strike animation on the hitter
-          if (hitterPlayer) {
-            const shotDx = nextDestX - hitOriginX;
-            const shotDz = nextDestZ - hitOriginZ;
-            const shotLen = Math.hypot(shotDx, shotDz) || 1;
+          if (hitterPlayer?.rank) {
             swingAnimsRef.current.set(hitterPlayer.id, {
-              startTime: now,
-              duration: 340,
-              hitterId: hitterPlayer.id,
+              elapsed: 0,
               contactPos,
-              shotDirX: shotDx / shotLen,
-              shotDirZ: shotDz / shotLen,
+              rank: hitterPlayer.rank,
+              plantLimit: 1.05,
             });
           }
 
           if (sceneRef.current) {
             spawnDustPuff(sceneRef.current, contactX, contactZ, dustPuffsRef);
-            spawnHitShockwave(sceneRef.current, contactPos, hitShockwavesRef);
           }
         } else {
           // Realistic parabolic flight trajectory
@@ -843,77 +1068,20 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         }
       }
 
-      // 3. Match Mode Camera Tracking (10-Second Skippable Intro -> Wide Full Court Visibility)
+      // Match camera stays on the near baseline as players rotate.
       if (currentMode === 'match' && cameraRef.current) {
         if (isMatchIntroActiveRef.current) {
-          const elapsedIntro = performance.now() - matchIntroStartTimeRef.current;
-          const sec = elapsedIntro / 1000;
-          const progress = Math.min(1.0, elapsedIntro / 10000);
-
-          if (venueType === 'indoor') {
-            // Animate gymnasium double doors swinging open inward
-            if (gymDoorsRef.current) {
-              if (sec < 1.4) {
-                gymDoorsRef.current.left.rotation.y = 0;
-                gymDoorsRef.current.right.rotation.y = 0;
-              } else if (sec < 3.8) {
-                const openProg = Math.min(1.0, (sec - 1.4) / 2.2);
-                const doorEase = Math.sin((openProg * Math.PI) / 2);
-                gymDoorsRef.current.left.rotation.y = -doorEase * 1.65;
-                gymDoorsRef.current.right.rotation.y = doorEase * 1.65;
-              } else {
-                gymDoorsRef.current.left.rotation.y = -1.65;
-                gymDoorsRef.current.right.rotation.y = 1.65;
-              }
-            }
-
-            // Cinematic Path: Hallway -> Walk through open doors -> Step onto court -> Rise to full match view
-            if (sec < 1.8) {
-              // Looking at the closed gym doors with the arena sign
-              const p = sec / 1.8;
-              cameraRef.current.position.set(0, 2.0, 23.0 - p * 0.8);
-              cameraRef.current.lookAt(0, 2.1, 14.5);
-            } else if (sec < 4.8) {
-              // Gliding right through the open double doors inside the building
-              const p = (sec - 1.8) / 3.0;
-              const ease = Math.sin((p * Math.PI) / 2);
-              const camZ = THREE.MathUtils.lerp(22.2, 11.0, ease);
-              const camY = THREE.MathUtils.lerp(2.0, 3.2, ease);
-              cameraRef.current.position.set(0, camY, camZ);
-              cameraRef.current.lookAt(0, 1.4, 0);
-            } else if (sec < 7.6) {
-              // Stepping into the gymnasium, panning across the court and bleachers
-              const p = (sec - 4.8) / 2.8;
-              const ease = p * p * (3 - 2 * p);
-              const camZ = THREE.MathUtils.lerp(11.0, 16.5, ease);
-              const camY = THREE.MathUtils.lerp(3.2, 10.5, ease);
-              const camX = Math.sin(p * Math.PI) * 2.4;
-              cameraRef.current.position.set(camX, camY, camZ);
-              cameraRef.current.lookAt(0, 0.8, 0.5);
-            } else {
-              // Rising up into full-court match view inside the gymnasium
-              const p = (sec - 7.6) / 2.4;
-              const ease = p * p * (3 - 2 * p);
-              cameraRef.current.position.x = 0;
-              cameraRef.current.position.y = THREE.MathUtils.lerp(10.5, 12.2, ease);
-              cameraRef.current.position.z = THREE.MathUtils.lerp(16.5, 16.8, ease);
-              cameraRef.current.lookAt(0, 0.2, -0.5);
-            }
-          } else {
-            // Outdoor backyard behind-school wide zoom-in
-            const ease = progress < 0.5
-              ? 4 * progress * progress * progress
-              : 1 - Math.pow(-2 * progress + 2, 3) / 2;
-            cameraRef.current.position.x = 0;
-            cameraRef.current.position.y = THREE.MathUtils.lerp(27.0, 17.8, ease);
-            cameraRef.current.position.z = THREE.MathUtils.lerp(34.0, 25.0, ease);
-            cameraRef.current.lookAt(0, 0.2, -2.5);
-          }
-
-          if (progress >= 1.0) {
-            isMatchIntroActiveRef.current = false;
-            setIsMatchIntroActive(false);
-          }
+          const progress = Math.min(1, (performance.now() - matchIntroStartTimeRef.current) / 4000);
+          const ease = progress * progress * (3 - 2 * progress);
+          const zoom = matchZoomRef.current;
+          const narrow = Math.max(1, 1.12 / cameraRef.current.aspect);
+          const distance = (venueType === 'indoor' ? 12 : 15) * narrow;
+          cameraRef.current.position.set(
+            THREE.MathUtils.lerp(4.2, 0, ease) * zoom,
+            THREE.MathUtils.lerp(8.2, 6.5, ease) * zoom * narrow,
+            THREE.MathUtils.lerp(distance, 9.75 * narrow, ease) * zoom,
+          );
+          cameraRef.current.lookAt(0, .65, .15);
         } else {
           const zf = matchZoomRef.current;
           if (currentCamView === 'first_person') {
@@ -927,14 +1095,13 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             cameraRef.current.position.set(cx, 7.6 * zf, cz);
             cameraRef.current.lookAt(0, 0.3, 0);
           } else if (currentCamView === 'third_person') {
-            // Wide Elevated Broadcast Overview - full court, all 4 players + YOU aura + rear school clearly visible!
-            if (venueType === 'indoor') {
-              cameraRef.current.position.set(0, 12.2 * zf, 16.8 * zf);
-              cameraRef.current.lookAt(0, 0.2, -0.5);
-            } else {
-              cameraRef.current.position.set(0, 17.8 * zf, 25.0 * zf);
-              cameraRef.current.lookAt(0, 0.2, -2.5);
-            }
+            const controlled = playerMeshesRef.current.get(humanPlayerIdRef.current);
+            const sx = controlled?.position.x ?? 0;
+            const narrow = Math.max(1, 1.12 / cameraRef.current.aspect);
+
+            baselineX = THREE.MathUtils.lerp(baselineX, sx, Math.min(1, delta * 5));
+            cameraRef.current.position.set(baselineX * 0.32, 6.5 * zf * narrow, 9.75 * zf * narrow);
+            cameraRef.current.lookAt(baselineX * 0.22, 0.65, 0.15);
           } else if (currentCamView === 'top_down') {
             cameraRef.current.position.set(0, (venueType === 'indoor' ? 20.0 : 27.0) * zf, 0.2);
             cameraRef.current.lookAt(0, 0, 0);
@@ -954,6 +1121,8 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             );
             cameraRef.current.lookAt(0, 0.2, -1.0);
           }
+          fitMatchCamera(cameraRef.current, playerMeshesRef.current.get(humanPlayerIdRef.current)?.position,
+            ballMeshRef.current?.position);
         }
       }
 
@@ -967,16 +1136,11 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         // Predict landing/intercept coordinate for incoming ball
         let interceptX = liveBall.x;
         let interceptZ = liveBall.z;
-        if (liveBall.isLive) {
-          // Solve remaining time until y reaches ~0.48m waist strike zone or bounce
+        if (liveBall.isLive && !liveBall.hasBouncedThisPlay) {
+          // Move to the first bounce, then track the playable ball.
           const g = 9.8;
-          const targetH = liveBall.y > 0.48 ? 0.48 : 0.22;
-          const disc = liveBall.vy * liveBall.vy - 2 * g * (targetH - liveBall.y);
-          let tReach = 0.25;
-          if (disc >= 0) {
-            const t1 = (liveBall.vy + Math.sqrt(disc)) / g;
-            if (t1 > 0.02) tReach = Math.min(0.9, t1);
-          }
+          const height = Math.max(0, liveBall.y - 0.22);
+          const tReach = Math.min(1.25, (liveBall.vy + Math.sqrt(liveBall.vy ** 2 + 2 * g * height)) / g);
           interceptX = liveBall.x + liveBall.vx * tReach;
           interceptZ = liveBall.z + liveBall.vz * tReach;
         }
@@ -999,15 +1163,10 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
               desiredZ = defZ * 0.88;
             }
           } else if (liveBall.isLive) {
-            const isReceivingTarget =
-              player.id === turnId ||
-              liveBall.targetSquare === sq ||
-              (interceptX >= bounds.minX - 0.5 &&
-                interceptX <= bounds.maxX + 0.5 &&
-                interceptZ >= bounds.minZ - 0.5 &&
-                interceptZ <= bounds.maxZ + 0.5);
+            const isReceivingTarget = player.id === turnId ||
+              (!liveBall.hasBouncedThisPlay && liveBall.targetSquare === sq);
 
-            if (isReceivingTarget) {
+            if (isReceivingTarget && (assistFootwork || player.id !== humanPlayerIdRef.current)) {
               // Position defender ~0.48m behind incoming ball toward outer corner so palm lands directly on ball
               const outLen = Math.hypot(defX, defZ) || 1;
               desiredX = THREE.MathUtils.clamp(interceptX + (defX / outLen) * 0.46, bounds.minX, bounds.maxX);
@@ -1019,18 +1178,33 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             }
           }
 
+          const keys = keysPressed.current;
+          const moveX = THREE.MathUtils.clamp(Number(!!keys.d) - Number(!!keys.a) + stickX, -1, 1);
+          const moveZ = THREE.MathUtils.clamp(Number(!!keys.s) - Number(!!keys.w) + stickZ, -1, 1);
+          const controlled = manualFootwork && player.id === humanPlayerIdRef.current;
+          const trainingTarget = followDrillMarker.current ? currentDrillMarker.current : undefined;
+          const manual = controlled && (moveX !== 0 || moveZ !== 0 || Boolean(trainingTarget));
+          const dive = controlled && (keys.f || pad?.buttons[5]?.pressed);
+          if (manual) {
+            const direction = (cameraRef.current?.position.z ?? 0) < 0 ? -1 : 1;
+            desiredX = THREE.MathUtils.clamp(grp.position.x + moveX * direction, bounds.minX, bounds.maxX);
+            desiredZ = THREE.MathUtils.clamp(grp.position.z + moveZ * direction, bounds.minZ, bounds.maxZ);
+            if (trainingTarget && moveX===0 && moveZ===0) { desiredX=trainingTarget.x;desiredZ=trainingTarget.z; if (Math.hypot(grp.position.x-trainingTarget.x,grp.position.z-trainingTarget.z)<.38) followDrillMarker.current=false; }
+            else followDrillMarker.current=false;
+          }
           const isSwinging = swingAnimsRef.current.has(player.id);
-          const stepRate =
-            player.id === turnId || liveBall.targetSquare === sq
-              ? Math.min(1, delta * 8.2)
-              : Math.min(1, delta * 4.2);
-
           const prevX = grp.position.x;
           const prevZ = grp.position.z;
-          const nextX = isSwinging ? prevX : THREE.MathUtils.lerp(prevX, desiredX, stepRate);
-          const nextZ = isSwinging ? prevZ : THREE.MathUtils.lerp(prevZ, desiredZ, stepRate);
+          const distance = Math.hypot(desiredX - prevX, desiredZ - prevZ);
+          const speedLimit = manual ? (dive ? 10 : 5.8) : player.id === turnId || liveBall.targetSquare === sq ? 6.4 : 4.2;
+          const step = isSwinging || !distance ? 0 : Math.min(1, delta * 8, speedLimit * delta / distance);
+          const nextX = THREE.MathUtils.lerp(prevX, desiredX, step);
+          const nextZ = THREE.MathUtils.lerp(prevZ, desiredZ, step);
+          if (controlled) reportPose.current?.({ id: player.id, x: nextX, z: nextZ, reaching: Boolean(dive) });
           grp.position.x = nextX;
           grp.position.z = nextZ;
+          grp.rotation.z = THREE.MathUtils.lerp(grp.rotation.z, dive && !isSwinging ? -moveX * 0.34 : 0, Math.min(1, delta * 12));
+          grp.position.y = THREE.MathUtils.lerp(grp.position.y, 0.035, Math.min(1, delta * 12));
           playerCourtPoseRef.current.set(player.id, {
             x: nextX,
             z: nextZ,
@@ -1048,6 +1222,12 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             const targetYaw = Math.atan2(lookTarget.x - nextX, lookTarget.z - nextZ);
             grp.rotation.y = lerpAngle(grp.rotation.y, targetYaw, Math.min(1, delta * 11));
             applyFootworkGait(grp, moveSpeed, elapsed);
+            if (dive) {
+              const torso = grp.getObjectByName('torsoMesh');
+              const arm = grp.getObjectByName('rightArm');
+              if (torso) torso.rotation.x = .24;
+              if (arm) arm.rotation.x = -.9;
+            }
           }
 
           // Smooth head eye-tracking toward the ball
@@ -1062,15 +1242,9 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
           // Keep serve ball physically cradled in front of the server's palm
           if (liveBall.isServing && !liveBall.isLive && player.id === serverId && ballMeshRef.current && ballShadowMeshRef.current) {
-            const fwdX = Math.sin(grp.rotation.y);
-            const fwdZ = Math.cos(grp.rotation.y);
-            const rightX = Math.cos(grp.rotation.y);
-            const rightZ = -Math.sin(grp.rotation.y);
-            const handBallX = nextX + fwdX * 0.44 + rightX * 0.16;
-            const handBallZ = nextZ + fwdZ * 0.44 + rightZ * 0.16;
-            const handBallY = 0.86 + Math.sin(elapsed * 3.5) * 0.025;
-            ballMeshRef.current.position.set(handBallX, handBallY, handBallZ);
-            ballShadowMeshRef.current.position.set(handBallX, 0.02, handBallZ);
+            const contact = serveContactPosition(sq);
+            ballMeshRef.current.position.set(contact.x, contact.y, contact.z);
+            ballShadowMeshRef.current.position.set(contact.x, 0.02, contact.z);
           }
         });
       }
@@ -1078,7 +1252,10 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       // 4. Update dynamic inverse-reach palm-strike hitting animations
       swingAnimsRef.current.forEach((anim, playerId) => {
         const pGrp = playerMeshesRef.current.get(playerId);
-        if (!pGrp) return;
+        if (!pGrp) {
+          swingAnimsRef.current.delete(playerId);
+          return;
+        }
 
         const rightArm = pGrp.getObjectByName('rightArm') as THREE.Group;
         const rightForearm = pGrp.getObjectByName('rightForearm') as THREE.Group;
@@ -1090,7 +1267,27 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         const leftShin = pGrp.getObjectByName('leftShin') as THREE.Group;
         const rightShin = pGrp.getObjectByName('rightShin') as THREE.Group;
 
-        const progress = Math.min(1.0, (performance.now() - anim.startTime) / anim.duration);
+        const previousProgress = anim.elapsed / STRIKE_DURATION;
+        anim.elapsed += delta;
+        // Render the contact frame even at low frame rates.
+        if (previousProgress < STRIKE_PHASE && anim.elapsed > STRIKE_PHASE * STRIKE_DURATION) {
+          anim.elapsed = STRIKE_PHASE * STRIKE_DURATION;
+        }
+        const progress = Math.min(1, anim.elapsed / STRIKE_DURATION);
+        const approach = Math.sin(Math.min(1, progress / STRIKE_PHASE) * Math.PI / 2);
+        if (!anim.plantStep) {
+          const { x: startX, z: startZ } = pGrp.position;
+          const dx = anim.contactPos.x - startX;
+          const dz = anim.contactPos.z - startZ;
+          const distance = Math.hypot(dx, dz);
+          const bounds = getSquarePlayBounds(anim.rank);
+          const step = distance > 0.42 ? Math.min(anim.plantLimit, distance - 0.42) / distance : 0;
+          anim.plantStep = {
+            startX, startZ,
+            endX: THREE.MathUtils.clamp(startX + dx * step, bounds.minX, bounds.maxX),
+            endZ: THREE.MathUtils.clamp(startZ + dz * step, bounds.minZ, bounds.maxZ),
+          };
+        }
         const aimYaw = Math.atan2(
           anim.contactPos.x - pGrp.position.x,
           anim.contactPos.z - pGrp.position.z
@@ -1101,9 +1298,8 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
         if (progress < 1.0) {
           pGrp.rotation.y = lerpAngle(pGrp.rotation.y, aimYaw, 0.45);
-          if (progress < 0.38) {
-            const swingT = progress / 0.38;
-            const lungeCurve = Math.sin((swingT * Math.PI) / 2);
+          if (progress < STRIKE_PHASE) {
+            const lungeCurve = approach;
 
             if (rightArm) {
               rightArm.rotation.x = THREE.MathUtils.lerp(-0.3, reachAngleX, lungeCurve);
@@ -1126,9 +1322,9 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             if (rightLeg) rightLeg.rotation.x = lungeCurve * 0.42;
             if (leftShin) leftShin.rotation.x = lungeCurve * 0.42;
             if (rightShin) rightShin.rotation.x = lungeCurve * 0.25;
-            pGrp.position.y = -lungeCurve * 0.09;
+            pGrp.position.y = 0.045;
           } else {
-            const returnT = (progress - 0.38) / 0.62;
+            const returnT = (progress - STRIKE_PHASE) / (1 - STRIKE_PHASE);
             const ease = 1 - Math.pow(1 - returnT, 2);
             if (rightArm) {
               rightArm.rotation.x = THREE.MathUtils.lerp(reachAngleX, -0.25, ease);
@@ -1149,7 +1345,32 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             if (rightLeg) rightLeg.rotation.x = THREE.MathUtils.lerp(0.42, 0, ease);
             if (leftShin) leftShin.rotation.x = THREE.MathUtils.lerp(0.42, 0, ease);
             if (rightShin) rightShin.rotation.x = THREE.MathUtils.lerp(0.25, 0, ease);
-            pGrp.position.y = THREE.MathUtils.lerp(-0.09, 0, ease);
+            pGrp.position.y = 0.045;
+          }
+          const { startX, startZ, endX, endZ } = anim.plantStep;
+          pGrp.position.x = THREE.MathUtils.lerp(startX, endX, approach);
+          pGrp.position.z = THREE.MathUtils.lerp(startZ, endZ, approach);
+          const contactWeight = progress <= STRIKE_PHASE ? approach : Math.max(0, 1 - (progress - STRIKE_PHASE) / 0.24);
+          const diving = anim.plantLimit === DIVE_STEP;
+          if (torso && contactWeight > 0) {
+            torso.rotation.x = contactWeight * (diving ? 0.58 : strikeHeight < 0.55 ? 0.44 : strikeHeight > 1.2 ? 0.12 : 0.26);
+          }
+          if (rightArm && contactWeight > 0) aimStrikePalm(rightArm, anim.contactPos, contactWeight);
+
+          if (previousProgress < STRIKE_PHASE && progress >= STRIKE_PHASE) {
+            spawnHitShockwave(scene, anim.contactPos, hitShockwavesRef);
+          }
+
+          const liveBall = ballStateRef.current;
+          if (currentMode === 'match' && liveBall.isLive && liveBall.lastHitterId === playerId &&
+              !liveBall.hasBouncedThisPlay && ballMeshRef.current && ballShadowMeshRef.current) {
+            const release = THREE.MathUtils.smoothstep(progress, STRIKE_PHASE, STRIKE_PHASE + 0.25);
+            ballMeshRef.current.position.set(
+              THREE.MathUtils.lerp(anim.contactPos.x, liveBall.x, release),
+              THREE.MathUtils.lerp(anim.contactPos.y, liveBall.y, release),
+              THREE.MathUtils.lerp(anim.contactPos.z, liveBall.z, release),
+            );
+            ballShadowMeshRef.current.position.set(ballMeshRef.current.position.x, 0.02, ballMeshRef.current.position.z);
           }
         } else {
           if (rightArm) {
@@ -1168,7 +1389,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           if (rightLeg) rightLeg.rotation.x = 0;
           if (leftShin) leftShin.rotation.x = 0;
           if (rightShin) rightShin.rotation.x = 0;
-          pGrp.position.y = 0;
+          pGrp.position.y = 0.035;
           swingAnimsRef.current.delete(playerId);
         }
       });
@@ -1180,7 +1401,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             const idleOffset = Number(id.replace(/\D/g, '')) || 0;
             const body = grp.getObjectByName('playerBody');
             if (body) {
-              body.position.y = Math.sin(elapsed * 3.0 + idleOffset) * 0.018;
+              body.position.y = 0.018 * (1 + Math.sin(elapsed * 3.0 + idleOffset));
             }
           }
           const youAura = grp.getObjectByName('youGroundAura') as THREE.Group | undefined;
@@ -1223,82 +1444,125 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         }
       }
 
-      // 6. Referee Sideline Pacing, Gait Leg/Arm Swing & Ball Eye Tracking
-      if (refereeMeshRef.current) {
-        // Pacing back and forth along east sideline at x = 5.2
-        const paceZ = Math.sin(elapsed * 0.45) * 4.2;
-        refereeMeshRef.current.position.set(5.2, 0, paceZ);
-
-        // Update referee cylinder collider in physics engine
-        globalPhysics.updateCylinderPos('referee', 5.2, paceZ);
-
-        // Orient body towards pacing direction (+Z or -Z)
-        const paceSpeed = Math.cos(elapsed * 0.45);
-        if (Math.abs(paceSpeed) > 0.05) {
-          refereeMeshRef.current.rotation.y = paceSpeed > 0 ? 0 : Math.PI;
+      // Officials react to the same calls used by the match HUD.
+      if (currentMode !== 'exploration') {
+        const ball = ballStateRef.current;
+        const { call, finished } = refereeState.current;
+        const callKey = call ? [call.type, call.timestamp, call.message, finished].join(':') : '';
+        if (callKey && callKey !== lastCallKey) {
+          lastCallKey = callKey;
+          if (finished) {
+            signal = 'end';
+            crowdStarted = signalStarted = elapsed;
+          } else if (call && call.type !== 'clean_hit') {
+            signal = call.type === 'serve_ready' ? 'serve' : call.type === 'serve_fault_one' ? 'replay' : 'out';
+            signalSquare = call.offendingSquare ?? 4;
+            if (signal === 'out' && lastBounceKey) crowdStarted = elapsed;
+            signalStarted = elapsed;
+          }
+          if (!ball.isLive) lastBounceKey = '';
         }
 
-        // Animate referee legs and arms walking gait
-        const refLeftLeg = refereeMeshRef.current.getObjectByName('leftLeg') as THREE.Group;
-        const refRightLeg = refereeMeshRef.current.getObjectByName('rightLeg') as THREE.Group;
-        const refLeftArm = refereeMeshRef.current.getObjectByName('leftArm') as THREE.Group;
-        const refRightArm = refereeMeshRef.current.getObjectByName('rightArm') as THREE.Group;
-        const refHead = refereeMeshRef.current.getObjectByName('headMesh') as THREE.Group;
-
-        const refGait = Math.sin(elapsed * 5.5);
-        if (refLeftLeg) refLeftLeg.rotation.x = refGait * 0.45;
-        if (refRightLeg) refRightLeg.rotation.x = -refGait * 0.45;
-        if (refLeftArm) refLeftArm.rotation.x = -refGait * 0.35;
-        if (refRightArm) refRightArm.rotation.x = refGait * 0.35;
-
-        // Head tracks ball position on court
-        if (refHead && ballMeshRef.current) {
-          const ballPos = ballMeshRef.current.position;
-          const localBallX = ballPos.x - 5.2;
-          const localBallZ = ballPos.z - paceZ;
-          const trackAngle = Math.atan2(localBallX, localBallZ);
-          refHead.rotation.y = THREE.MathUtils.clamp(trackAngle, -1.2, 1.2);
+        if (ball.hasBouncedThisPlay && ball.currentSquareOwner && ball.isLive) {
+          const bounceKey = [ball.hitCount, ball.lastHitterId, ball.currentSquareOwner].join(':');
+          if (bounceKey !== lastBounceKey) {
+            lastBounceKey = bounceKey;
+            signal = 'in';
+            signalSquare = ball.currentSquareOwner;
+            signalStarted = elapsed;
+            const hits = ball.hitCount ?? 0;
+            if (hits >= 3 && hits % 3 === 0) crowdStarted = elapsed;
+          }
         }
+
+        const official = refereeMeshRef.current;
+        const ballPosition = ballMeshRef.current?.position;
+        if (official && ballPosition) {
+          const age = elapsed - signalStarted;
+          const signaling = age < 1.12;
+          const targetZ = signaling ? official.position.z : THREE.MathUtils.clamp(ballPosition.z * 0.55, -2.7, 2.7);
+          const step = THREE.MathUtils.clamp(targetZ - official.position.z, -delta * 1.45, delta * 1.45);
+          official.position.z += step;
+          globalPhysics.updateCylinderPos('referee', official.position.x, official.position.z);
+          const [squareX, squareZ] = SQUARE_CONFIGS[signalSquare].center;
+          const focusX = signaling && signal !== 'end' ? squareX : ballPosition.x;
+          const focusZ = signaling && signal !== 'end' ? squareZ : ballPosition.z;
+          const yaw = Math.atan2(focusX - official.position.x, focusZ - official.position.z);
+          official.rotation.y = lerpAngle(official.rotation.y, yaw, Math.min(1, delta * 7));
+          applyFootworkGait(official, Math.abs(step) / Math.max(delta, 0.001), elapsed);
+
+          const head = official.getObjectByName('headMesh');
+          if (head) {
+            head.rotation.y = THREE.MathUtils.clamp(lerpAngle(official.rotation.y, yaw, 1) - official.rotation.y, -0.5, 0.5);
+            head.rotation.x = THREE.MathUtils.clamp((0.9 - ballPosition.y) * 0.15, -0.25, 0.25);
+          }
+          const pointing = official.getObjectByName('leftArm');
+          const whistle = official.getObjectByName('rightArm');
+          const weight = THREE.MathUtils.smoothstep(age, 0, 0.16) * (1 - THREE.MathUtils.smoothstep(age, 0.8, 1.12));
+          if (pointing) {
+            pointing.rotation.z = 0.14 + weight * (signal === 'replay' ? 0.5 : 0.13);
+            if (signaling) pointing.rotation.x = -0.25 - weight * (signal === 'in' ? 0.52 : signal === 'out' || signal === 'end' ? 2.15 : 1.15);
+          }
+          if (whistle) {
+            const blowsWhistle = signaling && (signal === 'out' || signal === 'end' || signal === 'replay');
+            whistle.rotation.z = -0.18 - (blowsWhistle ? weight * 0.48 : 0);
+            if (blowsWhistle) whistle.rotation.x = -0.25 - weight * 2.15;
+          }
+        }
+
+        spectatorsRef.current.forEach((spectator, index) => {
+          const head = spectator.getObjectByName('headMesh');
+          const left = spectator.getObjectByName('leftArm');
+          const right = spectator.getObjectByName('rightArm');
+          const phase = elapsed * 1.6 + index * 2.4;
+          if (head && ballPosition) {
+            const yaw = Math.atan2(ballPosition.x - spectator.position.x, ballPosition.z - spectator.position.z);
+            const turn = lerpAngle(spectator.rotation.y, yaw, 1) - spectator.rotation.y;
+            head.rotation.y = THREE.MathUtils.lerp(head.rotation.y, THREE.MathUtils.clamp(turn, -0.75, 0.75), Math.min(1, delta * 5));
+            head.rotation.x = -0.025 + Math.sin(phase * 0.53) * 0.045;
+          }
+          if (!left || !right) return;
+          const age = elapsed - crowdStarted - (index % 7) * 0.105;
+          const reaction = currentMode === 'match' && index % 5 !== 4
+            ? THREE.MathUtils.smoothstep(age, 0, 0.19) * (1 - THREE.MathUtils.smoothstep(age, 0.62, 1.18))
+            : 0;
+          left.rotation.set(-0.1 + 0.024 * Math.sin(phase), 0, 0.09);
+          right.rotation.set(-0.1 - 0.024 * Math.sin(phase), 0, -0.09);
+          if (index % 3 === 0) {
+            right.rotation.x -= reaction * 2.48;
+            right.rotation.z -= reaction * 0.37;
+          } else if (index % 3 === 1) {
+            const clap = reaction * (0.68 + 0.32 * Math.cos(age * 18));
+            left.rotation.x -= reaction * 1.04;
+            right.rotation.x -= reaction * 1.04;
+            left.rotation.y = -clap * 0.65;
+            right.rotation.y = clap * 0.65;
+          } else if (head) {
+            head.rotation.x -= reaction * 0.18;
+          }
+        });
       }
 
-      // 7. Spectators Head Ball Tracking & Cheering Animation
-      spectatorsRef.current.forEach((spec, idx) => {
-        const head = spec.getObjectByName('headMesh') as THREE.Group;
-        const armL = spec.getObjectByName('leftArm') as THREE.Group;
-        const armR = spec.getObjectByName('rightArm') as THREE.Group;
-
-        if (head && ballMeshRef.current) {
-          const ballPos = ballMeshRef.current.position;
-          const dx = ballPos.x - spec.position.x;
-          const dz = ballPos.z - spec.position.z;
-          head.rotation.y = THREE.MathUtils.clamp(Math.atan2(dx, dz) - spec.rotation.y, -1.0, 1.0);
-        }
-
-        // Cheering wave motion
-        if (idx % 2 === 0 && armL && armR) {
-          const cheerT = Math.sin(elapsed * 6 + idx);
-          armL.rotation.x = -1.2 + cheerT * 0.3;
-          armR.rotation.x = -1.2 - cheerT * 0.3;
-        }
-      });
-
       // 8. Dynamic Street Traffic & High-Quality Venue Arrival Animation (with solid exploration colliders & door-safe passenger)
-      const arrivalVeh = streetVehiclesRef.current.find((v) => v.isArrival);
-
       streetVehiclesRef.current.forEach((veh, vehIdx) => {
-        if (!veh.isArrival) {
-          let actualSpeed = veh.speed;
-          if (veh.direction === -1 && arrivalVeh) {
-            const distToArrival = veh.mesh.position.x - arrivalVeh.mesh.position.x;
-            if (distToArrival > 0 && distToArrival < 16 && arrivalVeh.mesh.position.z < -41.5) {
-              actualSpeed = Math.min(veh.speed, 2.5);
-            }
+          const actualSpeed = veh.speed;
+          const vehicleX = veh.mesh.position.x;
+          const vehicleZ = veh.mesh.position.z;
+          const [ex, , ez] = localPlayerPos.current;
+          const blockers = streetVehiclesRef.current.filter((item) => item !== veh)
+            .map(({ mesh }) => ({ x: mesh.position.x, z: mesh.position.z, halfX: 2.24, halfZ: 1.10 }));
+          if (currentMode === 'exploration') {
+            blockers.push({ x: ex, z: ez, halfX: 0.45, halfZ: 0.45 });
+            for (const npc of npcsRef.current) blockers.push({x:npc.position.x,z:npc.position.z,halfX:.45,halfZ:.45});
           }
-
-          veh.mesh.position.x += veh.direction * actualSpeed * delta;
-          if (veh.direction === 1 && veh.mesh.position.x > 38) {
+          const movement = veh.direction * actualSpeed * delta;
+          const clear = trafficTravel({ x: vehicleX, z: vehicleZ, halfX: 2.24, halfZ: 1.10 },
+            vehicleX + movement, veh.laneZ, blockers);
+          veh.mesh.position.x += movement * clear;
+          const spawnIsClear=(x:number)=>blockers.every((item)=>Math.abs(item.x-x)>item.halfX+2.38 || Math.abs(item.z-veh.laneZ)>item.halfZ+1.24);
+          if (veh.direction === 1 && veh.mesh.position.x > 38 && spawnIsClear(-38)) {
             veh.mesh.position.x = -38;
-          } else if (veh.direction === -1 && veh.mesh.position.x < -38) {
+          } else if (veh.direction === -1 && veh.mesh.position.x < -38 && spawnIsClear(38)) {
             veh.mesh.position.x = 38;
           }
 
@@ -1326,178 +1590,16 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
             const spin = wGroup?.getObjectByName('spinWheel');
             if (spin) spin.rotation.x += spinDelta;
           });
-        } else {
-          // High-Quality Tournament Arrival Vehicle on front Maple St (30-second smooth realistic loop)
-          const loopT = elapsed % 30;
-          let currentSpeed = 0;
-          let brakePitch = 0;
-
-          if (loopT < 6.0) {
-            const t = loopT / 6.0;
-            currentSpeed = THREE.MathUtils.lerp(7.0, 4.0, t);
-            veh.mesh.position.x = THREE.MathUtils.lerp(38, 26, t);
-            veh.mesh.position.z = -43.4;
-            veh.mesh.rotation.y = -Math.PI / 2;
-
-            if (veh.frontWheelL) veh.frontWheelL.rotation.y = 0;
-            if (veh.frontWheelR) veh.frontWheelR.rotation.y = 0;
-            if (veh.door) veh.door.rotation.y = 0;
-            if (veh.taillight) (veh.taillight.material as THREE.MeshBasicMaterial).color.set(0x991b1b);
-          } else if (loopT >= 6.0 && loopT < 10.5) {
-            const t = (loopT - 6.0) / 4.5;
-            currentSpeed = THREE.MathUtils.lerp(4.0, 0, t);
-            brakePitch = Math.sin(t * Math.PI) * 0.025;
-            veh.mesh.position.x = THREE.MathUtils.lerp(26, 18.0, t);
-            veh.mesh.position.z = THREE.MathUtils.lerp(-43.4, -40.4, t);
-
-            const steerAngle = Math.sin(t * Math.PI) * 0.32;
-            veh.mesh.rotation.y = -Math.PI / 2 + steerAngle * 0.35;
-            if (veh.frontWheelL) veh.frontWheelL.rotation.y = steerAngle;
-            if (veh.frontWheelR) veh.frontWheelR.rotation.y = steerAngle;
-            if (veh.taillight) (veh.taillight.material as THREE.MeshBasicMaterial).color.set(0xff0000);
-            if (veh.door) veh.door.rotation.y = 0;
-          } else if (loopT >= 10.5 && loopT < 21.0) {
-            // Parked flush in drop-off bay (Door opens 10.5-12.0s; passenger steps out 12.0-14.0s; returns 17.5-19.5s; door shuts 19.5-21.0s)
-            currentSpeed = 0;
-            veh.mesh.position.set(18.0, 0.15, -40.4);
-            veh.mesh.rotation.y = -Math.PI / 2;
-
-            if (veh.frontWheelL) veh.frontWheelL.rotation.y = 0;
-            if (veh.frontWheelR) veh.frontWheelR.rotation.y = 0;
-            if (veh.taillight) (veh.taillight.material as THREE.MeshBasicMaterial).color.set(0xff0000);
-
-            if (veh.door) {
-              if (loopT < 12.0) {
-                const openT = Math.min(1.0, (loopT - 10.5) / 1.5);
-                veh.door.rotation.y = THREE.MathUtils.lerp(0, -1.15, Math.sin((openT * Math.PI) / 2));
-              } else if (loopT >= 19.5) {
-                const closeT = Math.min(1.0, (loopT - 19.5) / 1.5);
-                veh.door.rotation.y = THREE.MathUtils.lerp(-1.15, 0, closeT);
-              } else {
-                veh.door.rotation.y = -1.15;
-              }
-            }
-          } else if (loopT >= 21.0 && loopT < 24.5) {
-            const t = (loopT - 21.0) / 3.5;
-            currentSpeed = THREE.MathUtils.lerp(0, 4.5, t);
-            brakePitch = -Math.sin(t * Math.PI) * 0.02;
-            if (veh.door) veh.door.rotation.y = 0;
-
-            veh.mesh.position.x = THREE.MathUtils.lerp(18.0, 12.0, t);
-            veh.mesh.position.z = THREE.MathUtils.lerp(-40.4, -43.4, t);
-
-            const steerLeft = -Math.sin(t * Math.PI) * 0.28;
-            veh.mesh.rotation.y = -Math.PI / 2 + steerLeft * 0.35;
-            if (veh.frontWheelL) veh.frontWheelL.rotation.y = steerLeft;
-            if (veh.frontWheelR) veh.frontWheelR.rotation.y = steerLeft;
-            if (veh.taillight) (veh.taillight.material as THREE.MeshBasicMaterial).color.set(0x991b1b);
-          } else {
-            const t = (loopT - 24.5) / 5.5;
-            currentSpeed = 7.0;
-            veh.mesh.position.x = THREE.MathUtils.lerp(12.0, -38.0, t);
-            veh.mesh.position.z = -43.4;
-            veh.mesh.rotation.y = -Math.PI / 2;
-
-            if (veh.frontWheelL) veh.frontWheelL.rotation.y = 0;
-            if (veh.frontWheelR) veh.frontWheelR.rotation.y = 0;
-            if (veh.door) veh.door.rotation.y = 0;
-            if (veh.taillight) (veh.taillight.material as THREE.MeshBasicMaterial).color.set(0x991b1b);
-          }
-
-          if (veh.carBody) {
-            veh.carBody.rotation.x = THREE.MathUtils.lerp(veh.carBody.rotation.x, brakePitch, 0.16);
-            veh.carBody.position.y = currentSpeed > 0.2 ? Math.sin(elapsed * 16) * 0.01 : 0;
-          }
-
-          // Animate passenger cleanly inside cabin seat -> steps out only while door is fully open (12.0s - 19.5s)
-          if (veh.passenger) {
-            const p = veh.passenger;
-            if (loopT < 12.0 || loopT >= 19.5) {
-              // Seated cleanly on right passenger seat inside local carBodyGroup
-              p.position.set(0.46, 0.17, 0.04);
-              p.rotation.set(0, 0, 0);
-              p.scale.setScalar(0.84);
-              applySeatedDriverPose(p, 1.0, 0);
-            } else if (loopT < 13.6) {
-              // Step out of seat -> doorway sill (1.12, 0.02, 0.12) -> behind open door onto curb (1.85, -0.15, -0.58)
-              const tOut = (loopT - 12.0) / 1.6;
-              if (tOut < 0.5) {
-                const s = tOut / 0.5;
-                p.position.set(
-                  THREE.MathUtils.lerp(0.46, 1.15, s),
-                  THREE.MathUtils.lerp(0.17, -0.05, s),
-                  THREE.MathUtils.lerp(0.04, -0.12, s)
-                );
-                p.rotation.set(0, THREE.MathUtils.lerp(0, Math.PI / 2, s), 0);
-                p.scale.setScalar(THREE.MathUtils.lerp(0.84, 0.88, s));
-                applySeatedDriverPose(p, THREE.MathUtils.lerp(1.0, 0.4, s), 0);
-              } else {
-                const s = (tOut - 0.5) / 0.5;
-                p.position.set(
-                  THREE.MathUtils.lerp(1.15, 1.85, s),
-                  THREE.MathUtils.lerp(-0.05, -0.15, s),
-                  THREE.MathUtils.lerp(-0.12, -0.55, s)
-                );
-                p.rotation.set(0, THREE.MathUtils.lerp(Math.PI / 2, Math.PI, s), 0);
-                p.scale.setScalar(THREE.MathUtils.lerp(0.88, 1.0, s));
-                applySeatedDriverPose(p, THREE.MathUtils.lerp(0.4, 0, s), 0);
-              }
-            } else if (loopT < 17.8) {
-              // Wait outside clear of open door looking toward schoolyard
-              p.position.set(1.85, -0.15, -0.55);
-              p.rotation.set(0, Math.PI + Math.sin(elapsed * 1.5) * 0.25, 0);
-              p.scale.setScalar(1.0);
-              applySeatedDriverPose(p, 0, 0);
-            } else {
-              // Step cleanly back through open doorway onto passenger seat before door shuts
-              const tIn = (loopT - 17.8) / 1.7;
-              if (tIn < 0.5) {
-                const s = tIn / 0.5;
-                p.position.set(
-                  THREE.MathUtils.lerp(1.85, 1.15, s),
-                  THREE.MathUtils.lerp(-0.15, -0.05, s),
-                  THREE.MathUtils.lerp(-0.55, -0.12, s)
-                );
-                p.rotation.set(0, THREE.MathUtils.lerp(Math.PI, -Math.PI / 2, s), 0);
-                p.scale.setScalar(THREE.MathUtils.lerp(1.0, 0.88, s));
-                applySeatedDriverPose(p, THREE.MathUtils.lerp(0, 0.4, s), 0);
-              } else {
-                const s = (tIn - 0.5) / 0.5;
-                p.position.set(
-                  THREE.MathUtils.lerp(1.15, 0.46, s),
-                  THREE.MathUtils.lerp(-0.05, 0.17, s),
-                  THREE.MathUtils.lerp(-0.12, 0.04, s)
-                );
-                p.rotation.set(0, THREE.MathUtils.lerp(-Math.PI / 2, 0, s), 0);
-                p.scale.setScalar(THREE.MathUtils.lerp(0.88, 0.84, s));
-                applySeatedDriverPose(p, THREE.MathUtils.lerp(0.4, 1.0, s), 0);
-              }
-            }
-          }
-
-          // Dynamic collider for tournament arrival vehicle so explorer never clips through it
-          globalPhysics.addBox({
-            id: 'arrival-car',
-            type: 'car',
-            minX: veh.mesh.position.x - 2.25,
-            maxX: veh.mesh.position.x + 2.25,
-            minZ: veh.mesh.position.z - 1.25,
-            maxZ: veh.mesh.position.z + 1.25,
-            minY: 0,
-            maxY: 2.2,
-          });
-
-          if (currentSpeed > 0) {
-            const spinDelta = (currentSpeed / 0.38) * delta;
-            ['frontWheelLeft', 'frontWheelRight', 'rearWheelLeft', 'rearWheelRight'].forEach((wn) => {
-              const wGroup = veh.mesh.getObjectByName(wn);
-              const spin = wGroup?.getObjectByName('spinWheel');
-              if (spin) spin.rotation.x += spinDelta;
-            });
-          }
-        }
       });
 
+      if (currentMode === 'preview') {
+        for (const player of playerMeshesRef.current.values()) {
+          for (const label of ['playerTagBadge', 'youGroundAura', 'youPointerArrow']) {
+            const element = player.getObjectByName(label);
+            if (element) element.visible = false;
+          }
+        }
+      }
       renderer.render(scene, camera);
     };
 
@@ -1506,7 +1608,22 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', handleResize);
+      disposeCampus(court);
+      const campus = scene.getObjectByName('campusExterior');
+      if (campus instanceof THREE.Group) disposeCampus(campus);
+      if(ballMeshRef.current?.material instanceof THREE.MeshStandardMaterial) {
+        ballMeshRef.current.material.map?.dispose();
+        ballMeshRef.current.material.bumpMap?.dispose();
+        ballMeshRef.current.material.dispose();
+        ballMeshRef.current.geometry.dispose();
+      }
+      if(captureFrameRef)captureFrameRef.current=null;
+      marker.geometry.dispose();
+      marker.material.dispose();
+      collectibles.forEach(({mesh})=>{mesh.geometry.dispose();mesh.material.dispose();});
       renderer.dispose();
+      rain?.geometry.dispose();
+      rain?.material.dispose();
       if (mountNode.contains(renderer.domElement)) {
         mountNode.removeChild(renderer.domElement);
       }
@@ -1531,10 +1648,10 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       npc.visible = mode === 'exploration';
     });
     if (ballMeshRef.current) {
-      ballMeshRef.current.visible = mode !== 'exploration' || true;
+      ballMeshRef.current.visible = true;
     }
     if (ballShadowMeshRef.current) {
-      ballShadowMeshRef.current.visible = mode !== 'exploration' || true;
+      ballShadowMeshRef.current.visible = true;
     }
     if (cameraRef.current) {
       updateCameraPosition(
@@ -1555,7 +1672,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       sceneRef.current.remove(explorerMeshRef.current);
     }
     const explorer = buildCharacterMesh(CHARACTERS[0], customization);
-    explorer.position.set(localPlayerPos.current[0], 0, localPlayerPos.current[2]);
+    explorer.position.set(...localPlayerPos.current);
     explorer.visible = mode === 'exploration';
     sceneRef.current.add(explorer);
     explorerMeshRef.current = explorer;
@@ -1565,6 +1682,13 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   useEffect(() => {
     const hitterId = ballState.lastHitterId;
     const hitCount = ballState.hitCount ?? 0;
+    const rank = ballState.lastHitterSquare;
+    if (mode !== 'match' || !hitterId || !rank) {
+      lastHitterWatchedRef.current = null;
+      lastHitCountWatchedRef.current = 0;
+      if (mode === 'match') swingAnimsRef.current.clear();
+      return;
+    }
     const hitChanged =
       (hitCount > 0 && hitCount !== lastHitCountWatchedRef.current) ||
       (hitterId && hitterId !== lastHitterWatchedRef.current);
@@ -1573,54 +1697,25 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       lastHitterWatchedRef.current = hitterId;
       lastHitCountWatchedRef.current = hitCount;
 
-      const contactPos = new THREE.Vector3(
-        ballState.x,
-        THREE.MathUtils.clamp(ballState.y, 0.35, 1.35),
-        ballState.z
-      );
-      const grp = playerMeshesRef.current.get(hitterId);
-      const vLen = Math.hypot(ballState.vx, ballState.vz) || 1;
-      const dirX = ballState.vx / vLen;
-      const dirZ = ballState.vz / vLen;
-
-      if (grp) {
-        // Ensure striker steps up cleanly into palm-strike reach of the ball if currently further away
-        const dist = Math.hypot(contactPos.x - grp.position.x, contactPos.z - grp.position.z);
-        if (dist > 0.68) {
-          const hitter = players.find((p) => p.id === hitterId);
-          const bounds = getSquarePlayBounds(hitter?.rank || 1);
-          const strikeDist = 0.48;
-          grp.position.x = THREE.MathUtils.clamp(
-            contactPos.x - dirX * strikeDist,
-            bounds.minX,
-            bounds.maxX
-          );
-          grp.position.z = THREE.MathUtils.clamp(
-            contactPos.z - dirZ * strikeDist,
-            bounds.minZ,
-            bounds.maxZ
-          );
-        }
-      }
-
+      const { x, y, z } = ballState.lastContact ?? ballState;
+      const isDiving = hitterId === humanPlayerIdRef.current &&
+        (keysPressed.current.f || readGamepad()?.buttons[5]?.pressed);
       swingAnimsRef.current.set(hitterId, {
-        startTime: performance.now(),
-        duration: 340,
-        hitterId,
-        contactPos,
-        shotDirX: dirX,
-        shotDirZ: dirZ,
+        elapsed: 0,
+        rank,
+        contactPos: new THREE.Vector3(x, y, z),
+        plantLimit: isDiving ? DIVE_STEP : STRIKE_STEP,
       });
-
-      if (sceneRef.current) {
-        spawnHitShockwave(sceneRef.current, contactPos, hitShockwavesRef);
-      }
     }
-  }, [ballState.hitCount, ballState.lastHitterId]);
+  }, [ballState.hitCount, ballState.lastHitterId, ballState.lastHitterSquare, ballState.lastContact, mode]);
 
   // Raycast hover reticle and click targets
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    // If dragging to orbit (active in Orbit Mode with primary button/touch, or with right-click)
+    const gesture = orbitGesture.current;
+    if (gesture && gesture.id === e.pointerId && !isDraggingRef.current) {
+      if (Math.hypot(e.clientX - gesture.x, e.clientY - gesture.y) < 5) return;
+      isDraggingRef.current = true;
+    }
     if (isDraggingRef.current) {
       const dx = e.clientX - lastPointerPosRef.current.x;
       const dy = e.clientY - lastPointerPosRef.current.y;
@@ -1656,20 +1751,18 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // In Orbit Mode during exploration, ANY click or drag orbits camera 360 degrees
-    if (activeOrbitRef.current && mode === 'exploration') {
-      isDraggingRef.current = true;
+    if (e.target !== e.currentTarget || !e.isPrimary) return;
+    if (mode === 'exploration' && (e.button === 0 || e.button === 2)) {
+      orbitGesture.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
       lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+      isDraggingRef.current = e.button === 2;
+      e.currentTarget.setPointerCapture(e.pointerId);
       return;
     }
+    activatePointer(e);
+  };
 
-    // Right mouse click (button === 2) -> start rotation drag
-    if (e.button === 2) {
-      isDraggingRef.current = true;
-      lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
-      return;
-    }
-
+  const activatePointer = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!containerRef.current || !cameraRef.current || !sceneRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     mouseRef.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1679,13 +1772,19 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     const intersects = raycasterRef.current.intersectObjects(sceneRef.current.children, true);
 
     // 1. Match Mode: striking the ball into target square
+    const trainingTarget = currentDrillMarker.current;
+    if (clickDrillMarkerToMove && trainingTarget && e.button === 0 && intersects.some(({point,object})=>
+      object.name.startsWith('courtSquare-') && Math.hypot(point.x-trainingTarget.x,point.z-trainingTarget.z)<.9)) {
+      followDrillMarker.current=true;
+      return;
+    }
     if (mode === 'match' && isHumanTurn && e.button === 0) {
       for (const hit of intersects) {
         const obj = hit.object;
         if (obj.name && obj.name.startsWith('courtSquare-')) {
           const sqId = parseInt(obj.name.split('-')[1], 10) as SquareId;
           if (highlightedSquares.includes(sqId)) {
-            onSelectTargetSquare(sqId, { x: hit.point.x, z: hit.point.z });
+            onSelectTargetSquare(sqId, { x: hit.point.x, z: hit.point.z }, e.shiftKey);
             if (hoverIndicatorRef.current) {
               (hoverIndicatorRef.current.material as THREE.MeshBasicMaterial).opacity = 0;
             }
@@ -1697,10 +1796,24 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
     // 2. Exploration Mode: click people or click ground to walk
     if (mode === 'exploration' && e.button === 0) {
+      if (seatedRef.current || lessonVisible.current) return;
       // Check if user clicked an NPC, student at desk, or teacher
       for (const hit of intersects) {
         let cur: THREE.Object3D | null = hit.object;
         while (cur && cur !== sceneRef.current) {
+          if (cur.userData.studyDesk && Math.hypot(localPlayerPos.current[0]-STUDY_SEAT.x,localPlayerPos.current[2]-STUDY_SEAT.z)<2.3) {
+            occupyDesk(true);
+            return;
+          }
+          if (typeof cur.userData.bookIndex==='number' && Math.abs(localPlayerPos.current[1] + 1 - hit.point.y) < 1.3 && Math.hypot(localPlayerPos.current[0]-hit.point.x,localPlayerPos.current[2]-hit.point.z)<3) {
+            setBookIndex(cur.userData.bookIndex);
+            return;
+          }
+          if (cur.userData.campaignNpc) {
+            soundFX.playClick();
+            onInteractNPCRef.current?.(cur.userData.campaignNpc);
+            return;
+          }
           if ((cur as any).userData?.character) {
             const char = (cur as any).userData.character as CharacterDef;
             soundFX.playClick();
@@ -1718,7 +1831,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
                   `Challenge me to a Four Square match anytime you're ready!`,
                 ],
                 tips: `Counter deep hits by staying light on your toes near the baseline!`,
-                isOpponent: true,
+                isOpponent: typeof cur.userData.studyIndex !== 'number',
               });
             }
             return;
@@ -1745,12 +1858,16 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!orbitGesture.current || orbitGesture.current.id !== e.pointerId) return;
+    const clicked = !isDraggingRef.current && e.button === 0 && e.type === 'pointerup';
+    orbitGesture.current = undefined;
     isDraggingRef.current = false;
+    if (clicked) activatePointer(e);
   };
 
   const handlePointerLeave = () => {
-    isDraggingRef.current = false;
+    if (!orbitGesture.current) isDraggingRef.current = false;
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -1763,7 +1880,33 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
   // Check proximity to interactive stations on the schoolyard
   const checkProximityPrompts = (pos: [number, number, number]) => {
-    const [px, , pz] = pos;
+    const [px, py, pz] = pos;
+    if (Math.hypot(px - SCHOOL_LIFT.x, pz - SCHOOL_LIFT.z) < .99) {
+      setInteractionPrompt({text: py > 1 ? 'Elevator to ground floor [E]' : 'Elevator to second floor [E]', action: () => {
+        if (liftJourney.current) return;
+        liftJourney.current = {from: py, to: py > 1 ? 0 : SCHOOL_UPPER.floor, elapsed: 0};
+        targetMovePosRef.current = null;
+        setInteractionPrompt(null);
+      }});
+      return;
+    }
+    if (py > 1) {
+      setInteractionPrompt(null);
+      return;
+    }
+    const pickup = venue && collection.current.onCollectItem && campusCollectibles(venue.id).find((item)=>!collection.current.collectedItems?.includes(item.id) && Math.hypot(px-item.x,pz-item.z)<1.5);
+    if (pickup) {
+      setInteractionPrompt({text:'Collect '+pickup.name+' [E]', action:()=>{collection.current.onCollectItem?.(pickup.id,pickup.name);setInteractionPrompt(null);}});
+      return;
+    }
+    if (Math.hypot(px-STUDY_SEAT.x,pz-STUDY_SEAT.z)<1.5) {
+      setInteractionPrompt({text:'Sit at the study desk [E]',action:()=>occupyDesk(true)});
+      return;
+    }
+    if (Math.hypot(px-LIBRARY_READ_SPOT.x,pz-LIBRARY_READ_SPOT.z)<1.7) {
+      setInteractionPrompt({text:'Read a book [E]',action:()=>setBookIndex(0)});
+      return;
+    }
 
     // 1. Check Four Square Court center (behind the school)
     const dCourt = Math.hypot(px - 0, pz - 0);
@@ -1776,7 +1919,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     }
 
     // 2. Check Red Funnel Ball
-    const dFunnel = Math.hypot(px - (-7.5), pz - 4.2);
+    const dFunnel = Math.hypot(px - FUNNEL_POSITION.x, pz - FUNNEL_POSITION.z);
     if (dFunnel < 2.5) {
       setInteractionPrompt({
         text: 'Press [E] or Click to Toss Ball in Red Funnel!',
@@ -1822,10 +1965,10 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
                 dialogueLines: [
                   `"${desk.char.quote}"`,
                   `I'm studying the 45-degree corner trajectory for recess!`,
-                  `Want to challenge me to a Four Square match right now?`,
+                  'I’m finishing my notes before recess.',
                 ],
                 tips: `Watch out for high topspin bounces into the corners!`,
-                isOpponent: true,
+                isOpponent: false,
               });
             }
           },
@@ -1868,7 +2011,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
     const dSchoolFront = Math.hypot(px - 0, pz - (-22.0));
     if (dSchoolRear < 2.8 || dSchoolFront < 2.8) {
       setInteractionPrompt({
-        text: 'Press [E] or Click to Enter Oakridge Classrooms & Theory Lessons',
+        text: 'Enter classroom [E]',
         action: () => setIsClassroomOpen(true),
       });
       return;
@@ -1899,12 +2042,15 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
   useEffect(() => {
     if (mode === 'preview') return;
     if (ballMeshRef.current && ballShadowMeshRef.current) {
+      if (mode === 'exploration') {
+        ballMeshRef.current.position.set(3.4,.235,2.4);
+        ballShadowMeshRef.current.position.set(3.4,.02,2.4);
+        return;
+      }
       if (ballState.isServing && !ballState.isLive) {
-        const sPos = SQUARE_CONFIGS[1].defaultPlayerPos;
-        const handX = sPos[0] * 0.88 + 0.31;
-        const handZ = sPos[2] * 0.88 - 0.31;
-        ballMeshRef.current.position.set(handX, 0.86, handZ);
-        ballShadowMeshRef.current.position.set(handX, 0.02, handZ);
+        const { x, y, z } = serveContactPosition(1);
+        ballMeshRef.current.position.set(x, y, z);
+        ballShadowMeshRef.current.position.set(x, 0.02, z);
         ballShadowMeshRef.current.scale.set(0.7, 0.7, 0.7);
         const shadowMat = ballShadowMeshRef.current.material as THREE.MeshBasicMaterial;
         shadowMat.opacity = 0.45;
@@ -1966,8 +2112,8 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
 
         // Only snap position when newly placed, rotated squares, or reset for serve; live footwork keeps smooth court steps!
         if (rankChanged || (ballState.isServing && !ballState.isLive)) {
-          grp.position.set(targetX, 0, targetZ);
-          grp.lookAt(0, 0.5, 0);
+          grp.position.set(targetX, 0.035, targetZ);
+          grp.rotation.set(0, Math.atan2(-targetX, -targetZ), 0);
           playerCourtPoseRef.current.set(player.id, {
             x: targetX,
             z: targetZ,
@@ -2027,35 +2173,23 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       onPointerMove={handlePointerMove}
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onLostPointerCapture={handlePointerUp}
       onPointerLeave={handlePointerLeave}
       onWheel={handleWheel}
       className="absolute inset-0 w-full h-full cursor-default overflow-hidden touch-none select-none"
     >
       {/* Dedicated WebGL Mount Canvas Node (Leaf node with zero React children) */}
-      <div ref={canvasMountRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+      <div data-game-canvas ref={canvasMountRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
-      {/* 10-Second Skippable Match Intro Zoom Overlay */}
       {mode === 'match' && isMatchIntroActive && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-40 pointer-events-auto flex flex-col items-center gap-2 animate-in fade-in slide-in-from-top-4 duration-300">
-          <div className="px-4 py-1.5 rounded-full bg-slate-900/95 border border-amber-400 text-amber-300 font-mono text-xs font-bold uppercase tracking-widest shadow-xl flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-            <span>
-              {venueType === 'indoor'
-                ? `🚪 ENTERING BULLDOG ARENA • WALKING INSIDE (${introCountdown}S)`
-                : `STADIUM OVERVIEW • ZOOMING IN (${introCountdown}S)`}
-            </span>
-          </div>
-          <button
-            onClick={skipIntro}
-            className="px-6 py-2.5 rounded-2xl bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-[0_10px_25px_rgba(251,191,36,0.6)] border-2 border-slate-950 flex items-center gap-2 cursor-pointer active:scale-95 transition-all"
-          >
-            <span>⚡ SKIP INTRO [SPACE / CLICK]</span>
-          </button>
+        <div className="field-panel absolute left-1/2 top-6 z-40 flex -translate-x-1/2 items-center gap-3 px-3 py-2 text-sm">
+          <strong>{venue?.name ?? 'Four Square'}</strong><span>{introCountdown}s</span>
+          <button className="league-button" onClick={skipIntro}>Skip</button>
         </div>
       )}
-
       {/* 5-Second Turn Shot Clock (Strict countdown per hit) */}
-      {mode === 'match' && !isMatchIntroActive && activeTurnPlayerId && (
+      {mode === 'match' && (onShotClockExpired || serveDeadline) && !matchFinished && ballState.isServing && !isMatchIntroActive && activeTurnPlayerId && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex flex-col items-center animate-in fade-in duration-200">
           <div
             className={`px-4 py-1.5 rounded-2xl border-2 backdrop-blur-md shadow-2xl flex items-center gap-3 transition-colors ${
@@ -2068,7 +2202,7 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
           >
             <div className="flex items-center gap-1.5 font-mono text-xs uppercase font-bold">
               <Timer className="w-4 h-4 text-amber-400" />
-              <span>TURN CLOCK:</span>
+              <span>Serve clock</span>
             </div>
             <div className="font-mono text-base font-black tracking-wider text-amber-400">
               {shotClockSeconds.toFixed(1)}s
@@ -2077,52 +2211,12 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
         </div>
       )}
 
-      {/* School Loudspeaker PA Announcement Banner */}
       {paAnnouncement && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 pointer-events-none animate-in fade-in slide-in-from-top-3 duration-300">
-          <div className="px-5 py-2.5 rounded-2xl bg-slate-900/95 border-2 border-amber-400 text-amber-300 shadow-2xl backdrop-blur-md flex items-center gap-3">
-            <div className="p-1.5 rounded-xl bg-amber-400 text-slate-950 font-black">
-              <Volume2 className="w-5 h-5 animate-pulse" />
-            </div>
-            <div>
-              <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-400">
-                SCHOOL LOUDSPEAKER PA ANNOUNCEMENT
-              </div>
-              <div className="text-xs sm:text-sm font-black text-white">
-                "{paAnnouncement}"
-              </div>
-            </div>
+        <div className="pointer-events-none absolute bottom-16 left-1/2 z-40 w-max max-w-[84vw] -translate-x-1/2">
+          <div className="field-panel flex items-center gap-2 px-3 py-2 text-xs text-white">
+            <Volume2 size={15} className="shrink-0 text-amber-200" />
+            <span>{paAnnouncement}</span>
           </div>
-        </div>
-      )}
-
-      {/* Exploration Locomotion Mode Switcher (Walk, Run, Bike) */}
-      {mode === 'exploration' && (
-        <div className="absolute bottom-4 right-4 z-30 pointer-events-auto flex items-center gap-1.5 p-1.5 rounded-2xl bg-slate-950/90 border border-slate-800 backdrop-blur-md shadow-2xl">
-          <button
-            onClick={() => { soundFX.playClick(); setLocomotionMode('walk'); }}
-            className={`px-3 py-1.5 rounded-xl font-black text-xs transition-all cursor-pointer ${
-              locomotionMode === 'walk' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            🚶 Walk
-          </button>
-          <button
-            onClick={() => { soundFX.playClick(); setLocomotionMode('run'); }}
-            className={`px-3 py-1.5 rounded-xl font-black text-xs transition-all cursor-pointer ${
-              locomotionMode === 'run' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            🏃 Run
-          </button>
-          <button
-            onClick={() => { soundFX.playClick(); setLocomotionMode('bike'); }}
-            className={`px-3 py-1.5 rounded-xl font-black text-xs transition-all cursor-pointer ${
-              locomotionMode === 'bike' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            🚲 Cycle
-          </button>
         </div>
       )}
 
@@ -2130,16 +2224,12 @@ export const ThreeCourtScene: React.FC<ThreeCourtSceneProps> = ({
       <ClassroomModal
         isOpen={isClassroomOpen}
         onClose={() => setIsClassroomOpen(false)}
-        onStartMatchWithClassmate={(classmate) => {
-          setIsClassroomOpen(false);
-          if (onStartMatchWithClassmate) {
-            onStartMatchWithClassmate(classmate);
-          } else if (onInteractCourt) {
-            onInteractCourt();
-          }
-        }}
         onRewardCoins={onRewardCoins}
+        passedLessons={completedLessons}
+        onPassLesson={onPassLesson}
       />
+      {seated && <button className="league-button absolute bottom-20 left-1/2 z-40 -translate-x-1/2 bg-neutral-950" onClick={()=>setIsClassroomOpen(true)}>Open workbook</button>}
+      {bookIndex!==undefined && <SchoolBookReader key={bookIndex} index={bookIndex} onClose={()=>setBookIndex(undefined)}/>}
     </div>
   );
 };
@@ -2234,95 +2324,21 @@ function updateCameraPosition(
 // -------------------------------------------------------------
 // Register Static Object Colliders in Physics Engine
 // -------------------------------------------------------------
-function setupStaticColliders() {
-  // 1. Backyard Red Funnel Ball Pole (behind the school beside the court)
-  globalPhysics.addCylinder({
-    id: 'funnel-ball-pole',
-    type: 'pole',
-    x: -7.5,
-    z: 4.2,
-    radius: 0.5,
-    height: 3.5,
-    isStatic: true,
-  });
-
-  // 2. Backyard Basketball Hoop Pole (west blacktop)
-  globalPhysics.addCylinder({
-    id: 'hoop-pole',
-    type: 'pole',
-    x: -11.5,
-    z: -2.5,
-    radius: 0.45,
-    height: 6.0,
-    isStatic: true,
-  });
-
-  // 3. Enterable Oakridge School Building (z in [-22.0, -8.0], x in [-26.0, 26.0])
-  // Open central Front Entrance (x in [-1.8, 1.8], z = -22.0) AND Backyard Exit (x in [-1.8, 1.8], z = -8.0)
-  // West Outer Wall
-  globalPhysics.addBox({
-    id: 'school-wall-west',
-    type: 'wall',
-    minX: -26.4,
-    maxX: -25.6,
-    minZ: -22.4,
-    maxZ: -7.6,
-    minY: 0,
-    maxY: 8.0,
-  });
-  // East Outer Wall
-  globalPhysics.addBox({
-    id: 'school-wall-east',
-    type: 'wall',
-    minX: 25.6,
-    maxX: 26.4,
-    minZ: -22.4,
-    maxZ: -7.6,
-    minY: 0,
-    maxY: 8.0,
-  });
-  // North Front Entrance Wall (Left & Right of Front Entrance Doors at z = -22.0)
-  globalPhysics.addBox({
-    id: 'school-wall-front-left',
-    type: 'wall',
-    minX: -26.0,
-    maxX: -1.8,
-    minZ: -22.4,
-    maxZ: -21.6,
-    minY: 0,
-    maxY: 8.0,
-  });
-  globalPhysics.addBox({
-    id: 'school-wall-front-right',
-    type: 'wall',
-    minX: 1.8,
-    maxX: 26.0,
-    minZ: -22.4,
-    maxZ: -21.6,
-    minY: 0,
-    maxY: 8.0,
-  });
-  // South Backyard Wall (Left & Right of Backyard Recess Double Doors at z = -8.0)
-  globalPhysics.addBox({
-    id: 'school-wall-rear-left',
-    type: 'wall',
-    minX: -26.0,
-    maxX: -1.8,
-    minZ: -8.4,
-    maxZ: -7.6,
-    minY: 0,
-    maxY: 8.0,
-  });
-  globalPhysics.addBox({
-    id: 'school-wall-rear-right',
-    type: 'wall',
-    minX: 1.8,
-    maxX: 26.0,
-    minZ: -8.4,
-    maxZ: -7.6,
-    minY: 0,
-    maxY: 8.0,
-  });
+function setupStaticColliders(id?: VenueDef['id']) {
+  const layout = getCampusLayout(id);
+  globalPhysics.addCylinder({ id: 'funnel-ball-pole', type: 'pole', ...FUNNEL_POSITION, radius: 0.45, height: 3.1, isStatic: true });
+  function addWall(id: string, x: number, z: number, width: number, depth: number, height: number) {
+    globalPhysics.addBox({ id, type: 'wall', minX: x - width / 2, maxX: x + width / 2,
+      minZ: z - depth / 2, maxZ: z + depth / 2, minY: 0, maxY: height });
+  }
+  campusWalls(layout).forEach((wall, index) => addWall(`campus-wall-${index}`, wall.x, wall.z, wall.width, wall.depth, wall.height));
+  campusPerimeter().forEach((wall, index) => addWall(`perimeter-${index}`, wall.x, wall.z, wall.width, wall.depth, 1.38));
+  campusPlayground(id).equipment.forEach((item, index) => addWall(`playground-${index}`, item.x, item.z, item.width, item.depth, item.height));
+  campusYardFence(layout).forEach(({ x, z, length, side }, index) =>
+    addWall('yard-'+index, x, z, side ? .34 : length, side ? length : .34, 1.8));
+  for (const [index, [x, z]] of campusTrees(layout).entries()) {
+    globalPhysics.addCylinder({ id: 'campus-tree-' + index, type: 'pole', x, z, radius: 0.31, height: 4, isStatic: true });
+  }
 
   // Interior Hallway Partition Walls (with open Classroom 101 double doorway at z in [-17.6, -12.6])
   globalPhysics.addBox({
@@ -2345,16 +2361,9 @@ function setupStaticColliders() {
     minY: 0,
     maxY: 6.0,
   });
-  globalPhysics.addBox({
-    id: 'school-hallway-east',
-    type: 'wall',
-    minX: 7.2,
-    maxX: 8.0,
-    minZ: -21.6,
-    maxZ: -8.4,
-    minY: 0,
-    maxY: 6.0,
-  });
+  for (const [i, [start,end]] of [[-21.6,EAST_OPENING.start],[EAST_OPENING.end,-8.4]].entries()) {
+    addWall('school-east-' + i, 7.6, (start + end)/2, 0.8, end-start, 5.4);
+  }
 
   // 4. Interior Lockers along front west hallway wall
   globalPhysics.addBox({
@@ -2374,130 +2383,12 @@ function setupStaticColliders() {
     type: 'wall',
     minX: 6.4,
     maxX: 7.2,
-    minZ: -18.5,
-    maxZ: -11.5,
+    minZ: -21,
+    maxZ: -18.1,
     minY: 0,
     maxY: 3.5,
   });
 
-  // 6. Front Curbside Promenade Bench (just inside front school gates)
-  globalPhysics.addBox({
-    id: 'curbside-bench',
-    type: 'bench',
-    minX: 0.9,
-    maxX: 4.1,
-    minZ: -38.0,
-    maxZ: -37.0,
-    minY: 0,
-    maxY: 1.0,
-  });
-
-  // 7. West & East Team Pavilion Bleachers flanking the backyard court
-  globalPhysics.addBox({
-    id: 'west-team-pavilion',
-    type: 'wall',
-    minX: -11.0,
-    maxX: -8.2,
-    minZ: -2.0,
-    maxZ: 2.0,
-    minY: 0,
-    maxY: 3.5,
-  });
-  globalPhysics.addBox({
-    id: 'east-team-pavilion',
-    type: 'wall',
-    minX: 8.2,
-    maxX: 11.0,
-    minZ: -2.0,
-    maxZ: 2.0,
-    minY: 0,
-    maxY: 3.5,
-  });
-
-  // 8. Front Schoolyard Gate & Perimeter Fence Colliders (Grand 13m Wide Central Gateway: x in [-6.5, 6.5], z = -38.5)
-  globalPhysics.addBox({
-    id: 'fence-front-west',
-    type: 'wall',
-    minX: -28.0,
-    maxX: -6.5,
-    minZ: -38.8,
-    maxZ: -38.2,
-    minY: 0,
-    maxY: 3.5,
-  });
-  globalPhysics.addBox({
-    id: 'fence-front-east',
-    type: 'wall',
-    minX: 6.5,
-    maxX: 28.0,
-    minZ: -38.8,
-    maxZ: -38.2,
-    minY: 0,
-    maxY: 3.5,
-  });
-
-  globalPhysics.addCylinder({
-    id: 'gate-pillar-left',
-    type: 'pole',
-    x: -6.5,
-    z: -38.5,
-    radius: 0.55,
-    height: 3.4,
-    isStatic: true,
-  });
-  globalPhysics.addCylinder({
-    id: 'gate-pillar-right',
-    type: 'pole',
-    x: 6.5,
-    z: -38.5,
-    radius: 0.55,
-    height: 3.4,
-    isStatic: true,
-  });
-
-  // 9. Backyard Schoolyard Perimeter Chain-Link Fences (bounding the backyard behind the school)
-  globalPhysics.addBox({
-    id: 'fence-backyard-south',
-    type: 'wall',
-    minX: -26.5,
-    maxX: 26.5,
-    minZ: 21.2,
-    maxZ: 21.8,
-    minY: 0,
-    maxY: 3.0,
-  });
-  globalPhysics.addBox({
-    id: 'fence-backyard-west',
-    type: 'wall',
-    minX: -26.3,
-    maxX: -25.7,
-    minZ: -8.0,
-    maxZ: 21.5,
-    minY: 0,
-    maxY: 3.0,
-  });
-  globalPhysics.addBox({
-    id: 'fence-backyard-east',
-    type: 'wall',
-    minX: 25.7,
-    maxX: 26.3,
-    minZ: -8.0,
-    maxZ: 21.5,
-    minY: 0,
-    maxY: 3.0,
-  });
-
-  // 10. Parked Hatchback Car along the front street parking bay (-16.0, 0.15, -40.4)
-  globalPhysics.addBox({
-    id: 'parked-hatchback-car',
-    type: 'car',
-    minX: -18.25,
-    maxX: -13.75,
-    minZ: -41.55,
-    maxZ: -39.25,
-    minY: 0,
-    maxY: 2.2,
-  });
 }
 
 // -------------------------------------------------------------
@@ -2511,7 +2402,8 @@ function buildVenueEnvironment(
   npcsRef: React.MutableRefObject<THREE.Group[]>,
   streetVehiclesRef?: React.MutableRefObject<any[]>,
   venueType: 'outdoor' | 'indoor' = 'outdoor',
-  gymDoorsRef?: React.MutableRefObject<{ left: THREE.Group; right: THREE.Group } | null>
+  gymDoorsRef?: React.MutableRefObject<{ left: THREE.Group; right: THREE.Group } | null>,
+  includeRooms = false,
 ) {
   const isIndoor = venueType === 'indoor';
 
@@ -2523,30 +2415,31 @@ function buildVenueEnvironment(
     const groundGeo = new THREE.PlaneGeometry(60, 60);
     groundGeo.rotateX(-Math.PI / 2);
     const groundTex = createSafeCanvasTexture(512, 512, (ctx) => {
-      ctx.fillStyle = '#fef08a';
-      ctx.fillRect(0, 0, 512, 512);
-      for (let y = 0; y < 512; y += 32) {
-        ctx.fillStyle = y % 64 === 0 ? '#fde047' : '#eab308';
-        ctx.fillRect(0, y, 512, 30);
-        ctx.strokeStyle = '#ca8a04';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(0, y, 512, 32);
+      const boards = ['#a77d56', '#b68a61', '#bc946e', '#ae825c', '#ad8561', '#b5916c'];
+      for (let y = 0; y < 512; y += 16) {
+        const row = y / 16;
+        for (let x = -128; x < 512; x += 128) {
+          const offset = x + (row % 4) * 29;
+          ctx.fillStyle = boards[((row * 11 + x / 128 + 7) % boards.length)];
+          ctx.fillRect(offset, y, 128, 16);
+          ctx.fillStyle = '#553d2f55';
+          ctx.fillRect(offset, y, 128, 1);
+          ctx.fillRect(offset, y, 1, 16);
+          for (let grain = 1; grain <= 5; grain++) {
+            ctx.fillStyle = grain % 2 ? '#ddbb8c32' : '#63473125';
+            ctx.fillRect(offset + (row * grain * 17 % 39), y + grain * 2.4, 62 + (row * 3 + grain * 9) % 23, .65);
+          }
+        }
       }
-      // Paint basketball key arcs on hardwood in navy
-      ctx.strokeStyle = 'rgba(30, 58, 138, 0.4)';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(256, 256, 180, 0, Math.PI * 2);
-      ctx.stroke();
     });
     groundTex.wrapS = THREE.RepeatWrapping;
     groundTex.wrapT = THREE.RepeatWrapping;
-    groundTex.repeat.set(10, 10);
+    groundTex.repeat.set(5, 5);
 
     const groundMat = new THREE.MeshStandardMaterial({
       map: groundTex,
-      roughness: 0.28,
-      metalness: 0.12,
+      roughness: 0.58,
+      metalness: 0.025,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.name = 'indoorHardwoodGround';
@@ -2554,8 +2447,8 @@ function buildVenueEnvironment(
     scene.add(ground);
 
     const gymGroup = new THREE.Group();
-    const gymWallMat = new THREE.MeshStandardMaterial({ color: '#111827', roughness: 0.85 });
-    const gymPadMat = new THREE.MeshStandardMaterial({ color: '#1d4ed8', roughness: 0.5 }); // blue safety padding
+    const gymWallMat = new THREE.MeshStandardMaterial({ color: '#303631', roughness: 0.85 });
+    const gymPadMat = new THREE.MeshStandardMaterial({ color: '#465e55', roughness: 0.65 });
 
     // North Wall (z = -14.5)
     const northWall = new THREE.Mesh(new THREE.BoxGeometry(40, 12, 1.0), gymWallMat);
@@ -2850,21 +2743,24 @@ function buildVenueEnvironment(
     refereeMeshRef.current = refMesh;
     scene.add(refMesh);
 
-    // Build Cheering Bleacher Fans inside the Gym!
+    const fanSkin = [0xe3aa79, 0xa76547, 0x754632, 0xf2caa5, 0xc48a65];
     const indoorFanColors = ['#2563eb', '#f59e0b', '#dc2626', '#10b981', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899'];
-    for (let f = 0; f < 8; f++) {
-      const isWestSide = f < 4;
-      const tierIndex = f % 3;
-      const fanX = isWestSide ? -13.5 - tierIndex * 0.9 : 13.5 + tierIndex * 0.9;
-      const fanY = 0.5 + tierIndex * 0.75;
-      const fanZ = (f % 4 - 1.5) * 3.8;
+    const standingSpots = [[-5, -7.6], [-3.9, -8.15], [-2.7, -7.35], [2.5, -8.4], [3.85, -7.48], [5, -8.05]];
+    for (let f = 0; f < 20; f++) {
+      const sign = f < 7 ? -1 : 1;
+      const tier = f % 3;
+      const sideline = f < 14;
+      const fanX = sideline ? sign * (13.1 + tier * 0.9) : standingSpots[f - 14][0];
+      const fanY = sideline ? 0.2 + tier * 0.75 : 0.035;
+      const fanZ = sideline ? (f % 7 - 3) * 2.3 : standingSpots[f - 14][1];
 
       const fanMesh = buildSpectatorPerson({
         shirtColor: indoorFanColors[f % indoorFanColors.length],
-        cheering: true,
+        skinColor: fanSkin[f % fanSkin.length],
+        hairColor: [0x201b16, 0x6e4934, 0x30221d, 0x9b7448][f % 4],
       });
       fanMesh.position.set(fanX, fanY, fanZ);
-      fanMesh.lookAt(0, 0.5, 0);
+      fanMesh.lookAt(0, fanY, 0);
       scene.add(fanMesh);
       spectatorsRef.current.push(fanMesh);
     }
@@ -2872,392 +2768,14 @@ function buildVenueEnvironment(
     return; // EXCLUSIVELY INDOOR! Early return prevents any outdoor props from loading
   }
 
-  // =============================================================
-  // OUTDOOR BLACKTOP & SCHOOLYARD (COURT BEHIND OAKRIDGE SCHOOL)
-  // Layout from -Z to +Z:
-  //   Houses (-52) -> Street (-44.2) -> Gate (-38.5) -> Front Courtyard (-30)
-  //   -> School (-22..-8) -> Backyard Recess Blacktop & Four Square Court (0) -> Backyard Park (+21.5)
-  // =============================================================
-  // 1. Expansive Asphalt Ground covering street, front courtyard, school, and backyard court
-  const groundGeo = new THREE.PlaneGeometry(110, 120);
-  groundGeo.rotateX(-Math.PI / 2);
+  const campus = buildCampusExterior(venue?.id);
+  campus.name = 'campusExterior';
+  scene.add(campus);
 
-  const groundTex = createSafeCanvasTexture(512, 512, (ctx) => {
-    ctx.fillStyle = '#64748b';
-    ctx.fillRect(0, 0, 512, 512);
-    for (let i = 0; i < 6000; i++) {
-      const x = Math.random() * 512;
-      const y = Math.random() * 512;
-      ctx.fillStyle = Math.random() > 0.5 ? '#475569' : '#94a3b8';
-      ctx.fillRect(x, y, 2, 2);
-    }
-  });
-  groundTex.wrapS = THREE.RepeatWrapping;
-  groundTex.wrapT = THREE.RepeatWrapping;
-  groundTex.repeat.set(22, 24);
-
-  const groundMat = new THREE.MeshStandardMaterial({
-    map: groundTex,
-    roughness: 0.92,
-    metalness: 0.05,
-  });
-  const ground = new THREE.Mesh(groundGeo, groundMat);
-  ground.name = 'asphaltGround';
-  ground.position.set(0, 0, -14);
-  ground.receiveShadow = true;
-  scene.add(ground);
-
-  // 2. Iconic Backyard RED FUNNEL BALL (west edge of the Four Square court)
-  const funnelGroup = new THREE.Group();
-  funnelGroup.position.set(-7.5, 0, 4.2);
-
-  const funnelPole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.12, 3.2, 16),
-    new THREE.MeshStandardMaterial({ color: '#94a3b8', metalness: 0.7, roughness: 0.3 })
-  );
-  funnelPole.position.y = 1.6;
-  funnelPole.castShadow = true;
-  funnelGroup.add(funnelPole);
-
-  const funnelBowl = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.25, 0.45, 1.4, 24, 1, true),
-    new THREE.MeshStandardMaterial({ color: '#dc2626', roughness: 0.4, side: THREE.DoubleSide })
-  );
-  funnelBowl.position.y = 3.6;
-  funnelBowl.castShadow = true;
-  funnelGroup.add(funnelBowl);
-
-  for (let c = 0; c < 4; c++) {
-    const angle = (c * Math.PI) / 2;
-    const chute = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.2, 0.22, 0.6, 12).rotateX(Math.PI / 3),
-      new THREE.MeshStandardMaterial({ color: '#b91c1c', roughness: 0.5 })
-    );
-    chute.position.set(Math.cos(angle) * 0.45, 2.9, Math.sin(angle) * 0.45);
-    chute.rotation.y = angle;
-    funnelGroup.add(chute);
-  }
-  scene.add(funnelGroup);
-
-  // 3. Enterable Grand Academic School Building, Front Courtyard Plaza & Rear Backyard Exit
   const schoolGroup = new THREE.Group();
-
-  const brickMat = new THREE.MeshStandardMaterial({ color: '#c2410c', roughness: 0.85 });
-  const stoneMat = new THREE.MeshStandardMaterial({ color: '#f1f5f9', roughness: 0.55 });
-  const roofMat = new THREE.MeshStandardMaterial({ color: '#b91c1c', roughness: 0.65 });
-  const windowMat = new THREE.MeshStandardMaterial({ color: '#0284c7', roughness: 0.15, metalness: 0.8 });
-
-  // -------------------------------------------------------------
-  // A. FRONT COURTYARD PLAZA & GREEN LAWN QUADS (in front of school, z in [-38, -22])
-  // -------------------------------------------------------------
-  const paverCanvas = document.createElement('canvas');
-  paverCanvas.width = 256;
-  paverCanvas.height = 256;
-  const pctx = paverCanvas.getContext('2d');
-  if (pctx) {
-    pctx.fillStyle = '#94a3b8';
-    pctx.fillRect(0, 0, 256, 256);
-    pctx.strokeStyle = '#64748b';
-    pctx.lineWidth = 4;
-    for (let x = 0; x < 256; x += 32) {
-      for (let y = 0; y < 256; y += 32) {
-        pctx.strokeRect(x, y, 32, 32);
-      }
-    }
-  }
-  const paverTex = new THREE.CanvasTexture(paverCanvas);
-  paverTex.wrapS = THREE.RepeatWrapping;
-  paverTex.wrapT = THREE.RepeatWrapping;
-  paverTex.repeat.set(16, 12);
-
-  const courtyardPlaza = new THREE.Mesh(
-    new THREE.PlaneGeometry(54, 16).rotateX(-Math.PI / 2),
-    new THREE.MeshStandardMaterial({ map: paverTex, roughness: 0.8 })
-  );
-  courtyardPlaza.name = 'asphaltGround';
-  courtyardPlaza.position.set(0, 0.015, -30.0);
-  courtyardPlaza.receiveShadow = true;
-  schoolGroup.add(courtyardPlaza);
-
-  const grassMat = new THREE.MeshStandardMaterial({ color: '#166534', roughness: 0.9 });
-  [-16.0, 16.0].forEach((lx) => {
-    const lawn = new THREE.Mesh(new THREE.PlaneGeometry(12.0, 12.0).rotateX(-Math.PI / 2), grassMat);
-    lawn.position.set(lx, 0.025, -30.0);
-    lawn.receiveShadow = true;
-    schoolGroup.add(lawn);
-
-    const lawnCurb = new THREE.Mesh(new THREE.BoxGeometry(12.2, 0.2, 12.2), stoneMat);
-    lawnCurb.position.set(lx, 0.1, -30.0);
-    schoolGroup.add(lawnCurb);
-  });
-
-  // Campus Shade Trees (Front Courtyard + Backyard Park Borders)
-  const trunkMat = new THREE.MeshStandardMaterial({ color: '#78350f' });
-  const leafMat = new THREE.MeshStandardMaterial({ color: '#15803d', roughness: 0.8 });
-  [
-    // Front Courtyard Trees
-    [-18.0, -34.0],
-    [-14.0, -25.0],
-    [14.0, -25.0],
-    [18.0, -34.0],
-    // Backyard Recess Yard Perimeter Trees (behind school, flanking the court cleanly)
-    [-21.0, -4.0],
-    [21.0, -4.0],
-    [-21.0, 12.0],
-    [21.0, 12.0],
-    [-14.0, 23.0],
-    [0.0, 23.5],
-    [14.0, 23.0],
-  ].forEach(([tx, tz]) => {
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 2.8, 8), trunkMat);
-    trunk.position.set(tx, 1.4, tz);
-    trunk.castShadow = true;
-
-    const foliage = new THREE.Mesh(new THREE.DodecahedronGeometry(1.8), leafMat);
-    foliage.position.set(tx, 3.6, tz);
-    foliage.castShadow = true;
-    schoolGroup.add(trunk, foliage);
-  });
-
-  // Front Courtyard Benches & Lamps
-  const benchMat = new THREE.MeshStandardMaterial({ color: '#92400e', roughness: 0.7 });
-  [
-    [-8.5, -28.0],
-    [8.5, -28.0],
-    [-8.5, -34.0],
-    [8.5, -34.0],
-  ].forEach(([bx, bz]) => {
-    const bench = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.5, 0.6), benchMat);
-    bench.position.set(bx, 0.25, bz);
-    bench.castShadow = true;
-    schoolGroup.add(bench);
-  });
-
-  const lampMat = new THREE.MeshStandardMaterial({ color: '#0f172a', metalness: 0.85 });
-  const lanternMat = new THREE.MeshBasicMaterial({ color: '#fef08a' });
-  [
-    [-8.5, -30.0],
-    [8.5, -30.0],
-    [-8.5, -36.0],
-    [8.5, -36.0],
-  ].forEach(([lx, lz]) => {
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 3.2, 8), lampMat);
-    pole.position.set(lx, 1.6, lz);
-    const lantern = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.45, 0.35), lanternMat);
-    lantern.position.set(lx, 3.2, lz);
-    schoolGroup.add(pole, lantern);
-  });
-
-  // Backyard Park Lawn Strip beyond the rear chain-link fence (z = 21.5..26.5)
-  const backyardLawn = new THREE.Mesh(new THREE.PlaneGeometry(68, 8).rotateX(-Math.PI / 2), grassMat);
-  backyardLawn.position.set(0, 0.02, 25.5);
-  backyardLawn.receiveShadow = true;
-  schoolGroup.add(backyardLawn);
-
-  // -------------------------------------------------------------
-  // B. GRAND 2-STORY ACADEMIC SCHOOL BUILDING (z = -22.0 Front .. -8.0 Backyard)
-  // -------------------------------------------------------------
-  // West Outer Wall
-  const westWall = new THREE.Mesh(new THREE.BoxGeometry(0.8, 8.0, 14.4), brickMat);
-  westWall.position.set(-26.0, 4.0, -15.0);
-  westWall.castShadow = true;
-  westWall.receiveShadow = true;
-  schoolGroup.add(westWall);
-
-  // East Outer Wall
-  const eastWall = new THREE.Mesh(new THREE.BoxGeometry(0.8, 8.0, 14.4), brickMat);
-  eastWall.position.set(26.0, 4.0, -15.0);
-  eastWall.castShadow = true;
-  eastWall.receiveShadow = true;
-  schoolGroup.add(eastWall);
-
-  // Front Entrance Wall at z = -22.0 (facing street/courtyard -Z, open central doorway [-1.8, 1.8])
-  const frontLeft = new THREE.Mesh(new THREE.BoxGeometry(24.2, 8.0, 0.8), brickMat);
-  frontLeft.position.set(-13.9, 4.0, -22.0);
-  frontLeft.castShadow = true;
-  frontLeft.receiveShadow = true;
-  const frontRight = new THREE.Mesh(new THREE.BoxGeometry(24.2, 8.0, 0.8), brickMat);
-  frontRight.position.set(13.9, 4.0, -22.0);
-  frontRight.castShadow = true;
-  frontRight.receiveShadow = true;
-  const frontLintel = new THREE.Mesh(new THREE.BoxGeometry(3.8, 3.8, 0.8), brickMat);
-  frontLintel.position.set(0, 6.1, -22.0);
-  schoolGroup.add(frontLeft, frontRight, frontLintel);
-
-  // Rear Backyard Wall at z = -8.0 (facing the Four Square Court +Z, open backyard recess doors [-1.8, 1.8])
-  const rearLeft = new THREE.Mesh(new THREE.BoxGeometry(24.2, 8.0, 0.8), brickMat);
-  rearLeft.position.set(-13.9, 4.0, -8.0);
-  rearLeft.castShadow = true;
-  rearLeft.receiveShadow = true;
-  const rearRight = new THREE.Mesh(new THREE.BoxGeometry(24.2, 8.0, 0.8), brickMat);
-  rearRight.position.set(13.9, 4.0, -8.0);
-  rearRight.castShadow = true;
-  rearRight.receiveShadow = true;
-  const rearLintel = new THREE.Mesh(new THREE.BoxGeometry(3.8, 3.8, 0.8), brickMat);
-  rearLintel.position.set(0, 6.1, -8.0);
-  schoolGroup.add(rearLeft, rearRight, rearLintel);
-
-  // Classroom Windows with Stone Sills on BOTH Front (-22.42) and Rear Backyard (-7.58) Facades
-  for (let wx = -23; wx <= 23; wx += 3.6) {
-    if (Math.abs(wx) < 3.2) continue;
-
-    // Front Facade Windows (-Z)
-    const fWin1 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.0, 0.15), windowMat);
-    fWin1.position.set(wx, 2.4, -22.42);
-    const fSill1 = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.18, 0.35), stoneMat);
-    fSill1.position.set(wx, 1.3, -22.42);
-    const fWin2 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.0, 0.15), windowMat);
-    fWin2.position.set(wx, 5.6, -22.42);
-    const fSill2 = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.18, 0.35), stoneMat);
-    fSill2.position.set(wx, 4.5, -22.42);
-
-    // Rear Backyard Facade Windows (+Z overlooking Four Square court)
-    const rWin1 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.0, 0.15), windowMat);
-    rWin1.position.set(wx, 2.4, -7.58);
-    const rSill1 = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.18, 0.35), stoneMat);
-    rSill1.position.set(wx, 1.3, -7.58);
-    const rWin2 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.0, 0.15), windowMat);
-    rWin2.position.set(wx, 5.6, -7.58);
-    const rSill2 = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.18, 0.35), stoneMat);
-    rSill2.position.set(wx, 4.5, -7.58);
-
-    schoolGroup.add(fWin1, fSill1, fWin2, fSill2, rWin1, rSill1, rWin2, rSill2);
-  }
-
-  // Grand Stone Entrance Portico & Steps on Front Facade (z = -22..-25, facing courtyard)
-  const portico = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.45, 3.2), stoneMat);
-  portico.position.set(0, 4.4, -23.4);
-  schoolGroup.add(portico);
-  [-2.2, 2.2].forEach((cx) => {
-    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.28, 4.2, 12), stoneMat);
-    col.position.set(cx, 2.1, -24.4);
-    schoolGroup.add(col);
-  });
-  for (let s = 0; s < 4; s++) {
-    const step = new THREE.Mesh(new THREE.BoxGeometry(5.4 - s * 0.4, 0.25, 0.8), stoneMat);
-    step.position.set(0, 0.125 + s * 0.25, -24.6 + s * 0.7);
-    step.receiveShadow = true;
-    schoolGroup.add(step);
-  }
-
-  // Backyard Recess Canopy, Stone Threshold & Steps behind the school (z = -8..-6.2, overlooking court)
-  const rearCanopy = new THREE.Mesh(
-    new THREE.BoxGeometry(5.2, 0.26, 2.2),
-    new THREE.MeshStandardMaterial({ color: '#1e3a8a', roughness: 0.45 })
-  );
-  rearCanopy.position.set(0, 4.2, -6.8);
-  rearCanopy.castShadow = true;
-  schoolGroup.add(rearCanopy);
-  [-2.1, 2.1].forEach((cx) => {
-    const col = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 4.0, 10), stoneMat);
-    col.position.set(cx, 2.0, -6.2);
-    schoolGroup.add(col);
-  });
-  for (let s = 0; s < 2; s++) {
-    const rearStep = new THREE.Mesh(new THREE.BoxGeometry(4.6 - s * 0.4, 0.16, 0.65), stoneMat);
-    rearStep.position.set(0, 0.08 + s * 0.12, -6.6 - s * 0.6);
-    rearStep.receiveShadow = true;
-    schoolGroup.add(rearStep);
-  }
-
-  // Open Double Glass Doorway Frames (warm golden welcome glow on both Front & Backyard sides)
-  const rearDoorGlow = new THREE.Mesh(
-    new THREE.PlaneGeometry(3.2, 3.8),
-    new THREE.MeshBasicMaterial({ color: '#fef08a', transparent: true, opacity: 0.42 })
-  );
-  rearDoorGlow.position.set(0, 2.1, -7.95);
-  const frontDoorGlow = new THREE.Mesh(
-    new THREE.PlaneGeometry(3.2, 3.8),
-    new THREE.MeshBasicMaterial({ color: '#fef08a', transparent: true, opacity: 0.42 })
-  );
-  frontDoorGlow.position.set(0, 2.1, -22.05);
-  frontDoorGlow.rotation.y = Math.PI;
-  schoolGroup.add(rearDoorGlow, frontDoorGlow);
-
-  // Rear Schoolyard Details: Metal Bicycle Rack (+5.6, -6.8) & School Recycling/Trash Bins (-5.8, -6.8)
-  const rackMat = new THREE.MeshStandardMaterial({ color: '#94a3b8', metalness: 0.85, roughness: 0.25 });
-  const rackBase = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.08, 0.9), rackMat);
-  rackBase.position.set(5.6, 0.04, -6.8);
-  schoolGroup.add(rackBase);
-  for (let r = 0; r < 5; r++) {
-    const loop = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.035, 8, 16, Math.PI), rackMat);
-    loop.position.set(4.6 + r * 0.5, 0.08, -6.8);
-    loop.rotation.y = Math.PI / 2;
-    schoolGroup.add(loop);
-  }
-  const trashBin = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.34, 0.28, 0.9, 14),
-    new THREE.MeshStandardMaterial({ color: '#334155', roughness: 0.7 })
-  );
-  trashBin.position.set(-5.8, 0.45, -6.8);
-  const recycleBin = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.34, 0.28, 0.9, 14),
-    new THREE.MeshStandardMaterial({ color: '#2563eb', roughness: 0.6 })
-  );
-  recycleBin.position.set(-6.7, 0.45, -6.8);
-  schoolGroup.add(trashBin, recycleBin);
-
-  // Terracotta Pitched Roof & Clock Tower Cupola centered above school (z = -15.0)
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(53.6, 1.4, 15.6), roofMat);
-  roof.position.set(0, 8.7, -15.0);
-  schoolGroup.add(roof);
-
-  const clockTower = new THREE.Mesh(new THREE.BoxGeometry(3.6, 4.2, 3.6), stoneMat);
-  clockTower.position.set(0, 10.8, -15.0);
-  const spire = new THREE.Mesh(new THREE.ConeGeometry(2.4, 3.8, 4), roofMat);
-  spire.position.set(0, 14.6, -15.0);
-  spire.rotation.y = Math.PI / 4;
-  schoolGroup.add(clockTower, spire);
-
-  // Front Banner facing Courtyard (-Z)
-  const bannerCanvas = document.createElement('canvas');
-  bannerCanvas.width = 512;
-  bannerCanvas.height = 128;
-  const bctx = bannerCanvas.getContext('2d');
-  if (bctx) {
-    bctx.fillStyle = '#1e3a8a';
-    bctx.fillRect(0, 0, 512, 128);
-    bctx.strokeStyle = '#f59e0b';
-    bctx.lineWidth = 6;
-    bctx.strokeRect(4, 4, 504, 120);
-    bctx.fillStyle = '#ffffff';
-    bctx.font = 'bold 30px sans-serif';
-    bctx.textAlign = 'center';
-    bctx.textBaseline = 'middle';
-    bctx.fillText('★ OAKRIDGE FOUR SQUARE ACADEMY ★', 256, 64);
-  }
-  const bannerTex = new THREE.CanvasTexture(bannerCanvas);
-  const frontBanner = new THREE.Mesh(
-    new THREE.PlaneGeometry(7.2, 1.6),
-    new THREE.MeshStandardMaterial({ map: bannerTex, roughness: 0.4 })
-  );
-  frontBanner.position.set(0, 5.8, -22.45);
-  frontBanner.rotation.y = Math.PI;
-  schoolGroup.add(frontBanner);
-
-  // Rear Backyard Championship Sign facing the outdoor Four Square Court (+Z)
-  const rearSignTex = createSafeCanvasTexture(512, 128, (rctx2) => {
-    rctx2.fillStyle = '#0f172a';
-    rctx2.fillRect(0, 0, 512, 128);
-    rctx2.strokeStyle = '#fbbf24';
-    rctx2.lineWidth = 6;
-    rctx2.strokeRect(4, 4, 504, 120);
-    rctx2.fillStyle = '#fbbf24';
-    rctx2.font = 'bold 28px sans-serif';
-    rctx2.textAlign = 'center';
-    rctx2.textBaseline = 'middle';
-    rctx2.fillText('OAKRIDGE RECESS YARD', 256, 46);
-    rctx2.fillStyle = '#ffffff';
-    rctx2.font = 'bold 20px sans-serif';
-    rctx2.fillText('BACKYARD FOUR SQUARE COURTS', 256, 88);
-  });
-  const rearBanner = new THREE.Mesh(
-    new THREE.PlaneGeometry(7.2, 1.6),
-    new THREE.MeshStandardMaterial({ map: rearSignTex, roughness: 0.4 })
-  );
-  rearBanner.position.set(0, 5.8, -7.55);
-  schoolGroup.add(rearBanner);
-
+  const brickMat = new THREE.MeshStandardMaterial({ color: 0xaea397, roughness: 0.88, side: THREE.DoubleSide });
+  const stoneMat = new THREE.MeshStandardMaterial({ color: 0x858680, roughness: 0.78 });
+  const windowMat = new THREE.MeshStandardMaterial({ color: 0x384b53, roughness: 0.4 });
   // -------------------------------------------------------------
   // C. ENTERABLE INTERIOR CORRIDOR & LOCKER HALLWAY (z in [-21.6, -8.4])
   // -------------------------------------------------------------
@@ -3268,9 +2786,12 @@ function buildVenueEnvironment(
   const westDoorLintel = new THREE.Mesh(new THREE.BoxGeometry(0.8, 2.5, 5.0), brickMat);
   westDoorLintel.position.set(-7.6, 5.25, -15.1);
 
-  const eastHallWall = new THREE.Mesh(new THREE.BoxGeometry(0.8, 6.5, 13.6), brickMat);
-  eastHallWall.position.set(7.6, 3.25, -15.0);
-  schoolGroup.add(westHallWallFront, westHallWallRear, westDoorLintel, eastHallWall);
+  for (const [start,end] of [[-21.6,EAST_OPENING.start],[EAST_OPENING.end,-8.4]]) {
+    const eastHallWall = new THREE.Mesh(new THREE.BoxGeometry(0.8, 5.4, end-start), brickMat);
+    eastHallWall.position.set(7.6, 2.7, (start+end)/2);
+    schoolGroup.add(eastHallWall);
+  }
+  schoolGroup.add(westHallWallFront, westHallWallRear, westDoorLintel);
 
   // Classroom 101 Doorway Welcoming Arch Sign
   const r101SignCanvas = document.createElement('canvas');
@@ -3340,296 +2861,51 @@ function buildVenueEnvironment(
 
   // Interior Championship Trophy Case Showcase along East Hallway Wall
   const trophyCase = new THREE.Mesh(
-    new THREE.BoxGeometry(0.8, 3.2, 6.0),
+    new THREE.BoxGeometry(0.8, 3.2, 2.8),
     new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.4 })
   );
-  trophyCase.position.set(6.8, 1.6, -15.0);
+  trophyCase.position.set(6.8, 1.6, -19.5);
   schoolGroup.add(trophyCase);
 
   const cup = new THREE.Mesh(
     new THREE.CylinderGeometry(0.3, 0.15, 0.8, 16),
     new THREE.MeshStandardMaterial({ color: '#f59e0b', metalness: 0.95, roughness: 0.1 })
   );
-  cup.position.set(6.2, 2.0, -15.0);
+  cup.position.set(6.32, 2.0, -19.5);
   schoolGroup.add(cup);
 
   // Hallway Students in Corridor
-  const hallwayMaya = buildHallwayStudent(CHARACTERS[3] || CHARACTERS[1], 'holding_ball');
+  const hallwayMaya = buildCharacterMesh(CHARACTERS[3]);
+  hallwayMaya.userData.character = CHARACTERS[3];
   hallwayMaya.position.set(3.8, 0, -17.5);
   hallwayMaya.rotation.y = -Math.PI / 2;
   schoolGroup.add(hallwayMaya);
 
-  const hallwayAlex = buildHallwayStudent(CHARACTERS[7] || CHARACTERS[0], 'locker_lean');
-  hallwayAlex.position.set(-6.1, 0, -19.5);
+  const hallwayAlex = buildCharacterMesh(CHARACTERS[7]);
+  hallwayAlex.userData.character = CHARACTERS[7];
+  hallwayAlex.position.set(-2.45, 0, -19.5);
   hallwayAlex.rotation.y = Math.PI / 2;
   schoolGroup.add(hallwayAlex);
 
   // -------------------------------------------------------------
-  // D. WALK-IN CLASSROOM ROOM 101 (WEST WING, z in [-21.6, -8.4])
-  // -------------------------------------------------------------
-  const classFloor = new THREE.Mesh(
-    new THREE.PlaneGeometry(17.6, 13.2).rotateX(-Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.5 })
-  );
-  classFloor.name = 'classroomFloor';
-  classFloor.position.set(-16.4, 0.035, -15.0);
-  classFloor.receiveShadow = true;
-  schoolGroup.add(classFloor);
-
-  // Green Chalkboard on Rear Classroom Wall (-8.6) facing students (-Z)
-  const classBoardCanvas = document.createElement('canvas');
-  classBoardCanvas.width = 1024;
-  classBoardCanvas.height = 512;
-  const cbctx = classBoardCanvas.getContext('2d');
-  if (cbctx) {
-    cbctx.fillStyle = '#064e3b';
-    cbctx.fillRect(0, 0, 1024, 512);
-    cbctx.strokeStyle = '#78350f';
-    cbctx.lineWidth = 14;
-    cbctx.strokeRect(6, 6, 1012, 500);
-
-    cbctx.fillStyle = '#ffffff';
-    cbctx.font = 'bold 36px monospace';
-    cbctx.fillText('FOUR SQUARE THEORY: 45° CORNER CUT', 40, 60);
-
-    cbctx.strokeStyle = '#fbbf24';
-    cbctx.lineWidth = 4;
-    cbctx.strokeRect(360, 100, 300, 300);
-    cbctx.beginPath();
-    cbctx.moveTo(510, 100);
-    cbctx.lineTo(510, 400);
-    cbctx.moveTo(360, 250);
-    cbctx.lineTo(660, 250);
-    cbctx.stroke();
-
-    cbctx.fillStyle = '#fef08a';
-    cbctx.font = 'bold 26px sans-serif';
-    cbctx.fillText('1 (KING)', 390, 180);
-    cbctx.fillText('2', 580, 180);
-    cbctx.fillText('3', 580, 340);
-    cbctx.fillText('4 (ACE)', 390, 340);
-
-    cbctx.strokeStyle = '#ef4444';
-    cbctx.lineWidth = 6;
-    cbctx.beginPath();
-    cbctx.moveTo(440, 180);
-    cbctx.lineTo(590, 330);
-    cbctx.stroke();
-
-    cbctx.fillStyle = '#93c5fd';
-    cbctx.font = '22px monospace';
-    cbctx.fillText('• Square 1 Serves diagonally to 4', 40, 440);
-    cbctx.fillText('• Underhand strike below waist', 40, 475);
+  const campusRooms = includeRooms ? buildCampusRooms() : undefined;
+  if (campusRooms) {
+    schoolGroup.add(campusRooms.group, buildSchoolUpperFloor(globalPhysics));
+    if (venue) schoolGroup.add(buildCampusAnnex(venue.id, globalPhysics), buildCampusCrowd(globalPhysics));
   }
-  const classBoardTex = new THREE.CanvasTexture(classBoardCanvas);
-  const classBoard = new THREE.Mesh(
-    new THREE.BoxGeometry(9.0, 3.2, 0.1),
-    new THREE.MeshStandardMaterial({ map: classBoardTex, roughness: 0.35 })
-  );
-  classBoard.position.set(-16.0, 3.4, -8.6);
-  classBoard.rotation.y = Math.PI;
-  schoolGroup.add(classBoard);
-
-  // Teacher Coach Leo at the Chalkboard Teaching
-  const classTeacher = buildTeacherInstructor('Coach Leo', 'Four Square Head Instructor');
-  classTeacher.position.set(-11.8, 0, -10.4);
-  classTeacher.rotation.y = Math.PI - 0.25;
-  schoolGroup.add(classTeacher);
-
-  // Teacher Podium with Red Voit Rubber Ball
-  const classPodium = new THREE.Mesh(
-    new THREE.BoxGeometry(1.4, 1.1, 0.9),
-    new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 })
-  );
-  classPodium.position.set(-14.2, 0.55, -10.4);
-  const classRedBall = new THREE.Mesh(
-    new THREE.SphereGeometry(0.24, 16, 16),
-    new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.5 })
-  );
-  classRedBall.position.set(-14.2, 1.34, -10.4);
-  schoolGroup.add(classPodium, classRedBall);
-
-  // 6 Student Desks with Seated Kids facing the chalkboard (+Z toward -8.6)
-  const classStudents = [
-    CHARACTERS[0], // Toby "Patch"
-    CHARACTERS[1], // Blocky
-    CHARACTERS[2], // Skater Roxy
-    CHARACTERS[4], // Gloop Slime King
-    CHARACTERS[5], // Nova
-    CHARACTERS[6], // Ren
-  ];
-  const deskCoords = [
-    { x: -12.2, z: -13.6, c: classStudents[0] },
-    { x: -15.8, z: -13.6, c: classStudents[1] },
-    { x: -19.4, z: -13.6, c: classStudents[2] },
-    { x: -12.2, z: -17.4, c: classStudents[3] },
-    { x: -15.8, z: -17.4, c: classStudents[4] },
-    { x: -19.4, z: -17.4, c: classStudents[5] },
-  ];
-  deskCoords.forEach((d) => {
-    const sDesk = buildSeatedStudent(d.c, { deskWidth: 1.3, deskDepth: 0.75 });
-    sDesk.position.set(d.x, 0, d.z);
-    schoolGroup.add(sDesk);
+  [hallwayMaya,hallwayAlex].forEach((student, index) => {
+    globalPhysics.addCylinder({ id: 'hallway-student-' + index, type: 'person', x: student.position.x,
+      z: student.position.z, radius: 0.43, height: 1.8, isStatic: true });
+  });
+  for (const [i, item] of (campusRooms?.fixtures ?? []).entries()) globalPhysics.addBox({
+    id: 'school-fixture-' + i, type: 'wall', minX: item.x - item.width/2, maxX: item.x + item.width/2,
+    minZ: item.z - item.depth/2, maxZ: item.z + item.depth/2, minY: 0, maxY: item.height,
   });
 
-  // Other Classroom Doors inside Hallway
-  const createClassDoor = (_label: string, x: number, z: number, rotY: number) => {
-    const doorMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(1.6, 3.2, 0.1),
-      new THREE.MeshStandardMaterial({ color: '#475569', roughness: 0.6 })
-    );
-    doorMesh.position.set(x, 1.6, z);
-    doorMesh.rotation.y = rotY;
-    schoolGroup.add(doorMesh);
-  };
-  createClassDoor('Room 102 (Science)', -7.1, -9.8, Math.PI / 2);
-  createClassDoor('Principal Office', 7.1, -18.5, -Math.PI / 2);
-
+  schoolGroup.traverse((object) => {
+    if (object instanceof THREE.Mesh && object.material === brickMat) object.userData.cameraWall = true;
+  });
   scene.add(schoolGroup);
-
-  // -------------------------------------------------------------
-  // Front Perimeter Fence, Front Gates & Maple Street Drop-Off (in front of school)
-  // -------------------------------------------------------------
-  const gateGroup = new THREE.Group();
-  const fenceMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.8, roughness: 0.3 });
-
-  // Wrought Iron Front Fence along z = -38.5
-  [-28, -22, -16, -10].forEach((fx) => {
-    const fenceSection = new THREE.Group();
-    for (let bar = 0; bar < 8; bar++) {
-      const p = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 3.2, 8), fenceMat);
-      p.position.set(fx + bar * 0.7, 1.6, -38.5);
-      fenceSection.add(p);
-    }
-    gateGroup.add(fenceSection);
-  });
-  [7.2, 13, 19, 25].forEach((fx) => {
-    const fenceSection = new THREE.Group();
-    for (let bar = 0; bar < 8; bar++) {
-      const p = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 3.2, 8), fenceMat);
-      p.position.set(fx + bar * 0.7, 1.6, -38.5);
-      fenceSection.add(p);
-    }
-    gateGroup.add(fenceSection);
-  });
-
-  // Backyard Chain-Link Fence framing the recess court (behind the school at z = +21.5 and x = ±26.0)
-  const chainLinkMat = new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.75, roughness: 0.35 });
-  for (let bx = -26; bx <= 26; bx += 3.25) {
-    const fPost = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8), chainLinkMat);
-    fPost.position.set(bx, 1.3, 21.5);
-    gateGroup.add(fPost);
-  }
-  const topRailBack = new THREE.Mesh(new THREE.BoxGeometry(52.0, 0.07, 0.07), chainLinkMat);
-  topRailBack.position.set(0, 2.55, 21.5);
-  const meshBack = new THREE.Mesh(
-    new THREE.PlaneGeometry(52.0, 2.5),
-    new THREE.MeshBasicMaterial({ color: '#94a3b8', wireframe: true, transparent: true, opacity: 0.32, side: THREE.DoubleSide })
-  );
-  meshBack.position.set(0, 1.3, 21.5);
-  gateGroup.add(topRailBack, meshBack);
-
-  [-26.0, 26.0].forEach((sx) => {
-    for (let bz = -8; bz <= 21.5; bz += 3.7) {
-      const sPost = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2.6, 8), chainLinkMat);
-      sPost.position.set(sx, 1.3, bz);
-      gateGroup.add(sPost);
-    }
-    const sideRail = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 29.5), chainLinkMat);
-    sideRail.position.set(sx, 2.55, 6.75);
-    const sideMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(29.5, 2.5),
-      new THREE.MeshBasicMaterial({ color: '#94a3b8', wireframe: true, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
-    );
-    sideMesh.position.set(sx, 1.3, 6.75);
-    sideMesh.rotation.y = Math.PI / 2;
-    gateGroup.add(sideRail, sideMesh);
-  });
-
-  // Front Brick Gate Entrance Pillars (at x = ±6.5, z = -38.5)
-  const pillarMat = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.8 });
-  const pillarL = new THREE.Mesh(new THREE.BoxGeometry(1.2, 3.6, 1.2), pillarMat);
-  pillarL.position.set(-6.5, 1.8, -38.5);
-  pillarL.castShadow = true;
-  const pillarR = new THREE.Mesh(new THREE.BoxGeometry(1.2, 3.6, 1.2), pillarMat);
-  pillarR.position.set(6.5, 1.8, -38.5);
-  pillarR.castShadow = true;
-
-  const gateLanternMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.9, roughness: 0.2 });
-  const lanternL = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.65, 0.45), gateLanternMat);
-  lanternL.position.set(-6.5, 3.9, -38.5);
-  const lanternR = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.65, 0.45), gateLanternMat);
-  lanternR.position.set(6.5, 3.9, -38.5);
-
-  const openGateL = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.6, 2.8), fenceMat);
-  openGateL.position.set(-6.4, 1.4, -37.0);
-  const openGateR = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.6, 2.8), fenceMat);
-  openGateR.position.set(6.4, 1.4, -37.0);
-
-  const archCanvas = document.createElement('canvas');
-  archCanvas.width = 512;
-  archCanvas.height = 128;
-  const actx = archCanvas.getContext('2d');
-  if (actx) {
-    actx.fillStyle = '#1e3a8a';
-    actx.fillRect(0, 0, 512, 128);
-    actx.strokeStyle = '#f59e0b';
-    actx.lineWidth = 6;
-    actx.strokeRect(4, 4, 504, 120);
-    actx.fillStyle = '#fbbf24';
-    actx.font = 'bold 30px sans-serif';
-    actx.textAlign = 'center';
-    actx.fillText('★ OAKRIDGE ACADEMY FRONT GATE ★', 256, 52);
-    actx.font = 'bold 20px sans-serif';
-    actx.fillStyle = '#ffffff';
-    actx.fillText('RECESS COURTS THROUGH SCHOOLYARD', 256, 95);
-  }
-  const archTex = new THREE.CanvasTexture(archCanvas);
-  const archBanner = new THREE.Mesh(
-    new THREE.PlaneGeometry(12.5, 1.8),
-    new THREE.MeshStandardMaterial({ map: archTex, roughness: 0.4 })
-  );
-  archBanner.position.set(0, 4.6, -38.5);
-  archBanner.rotation.y = Math.PI;
-  gateGroup.add(pillarL, pillarR, lanternL, lanternR, openGateL, openGateR, archBanner);
-
-  // Outer Street Asphalt Road in Front of School Gates (z = -44.2)
-  const frontRoad = new THREE.Mesh(
-    new THREE.PlaneGeometry(80, 11.0).rotateX(-Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.8 })
-  );
-  frontRoad.position.set(0, 0.01, -44.2);
-  frontRoad.receiveShadow = true;
-  gateGroup.add(frontRoad);
-
-  const streetCurb = new THREE.Mesh(
-    new THREE.BoxGeometry(80, 0.2, 1.8),
-    new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.9 })
-  );
-  streetCurb.position.set(0, 0.1, -39.0);
-  streetCurb.receiveShadow = true;
-  gateGroup.add(streetCurb);
-
-  const solidYellowMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
-  const solidLine1 = new THREE.Mesh(new THREE.PlaneGeometry(80, 0.12).rotateX(-Math.PI / 2), solidYellowMat);
-  solidLine1.position.set(0, 0.02, -44.52);
-  const solidLine2 = new THREE.Mesh(new THREE.PlaneGeometry(80, 0.12).rotateX(-Math.PI / 2), solidYellowMat);
-  solidLine2.position.set(0, 0.02, -44.68);
-  gateGroup.add(solidLine1, solidLine2);
-
-  const solidWhiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const whiteEdge1 = new THREE.Mesh(new THREE.PlaneGeometry(80, 0.14).rotateX(-Math.PI / 2), solidWhiteMat);
-  whiteEdge1.position.set(0, 0.02, -40.2);
-  const whiteEdge2 = new THREE.Mesh(new THREE.PlaneGeometry(80, 0.14).rotateX(-Math.PI / 2), solidWhiteMat);
-  whiteEdge2.position.set(0, 0.02, -49.0);
-  gateGroup.add(whiteEdge1, whiteEdge2);
-
-  const parkedCar = buildRoadTripCar('#475569');
-  parkedCar.position.set(-16.0, 0.15, -40.4);
-  parkedCar.rotation.y = Math.PI / 2;
-  gateGroup.add(parkedCar);
-
-  scene.add(gateGroup);
 
   // Dynamic Front Street Traffic & Drop-Off Vehicle Scene (along Maple Street z = -43.4..-46.5)
   if (streetVehiclesRef) {
@@ -3657,135 +2933,35 @@ function buildVenueEnvironment(
       direction: -1,
     });
 
-    const carArrival = buildRoadTripCar('#eab308');
-    carArrival.position.set(38.0, 0.15, -43.4);
-    carArrival.rotation.y = -Math.PI / 2;
-    const arrivalBody = (carArrival.getObjectByName('carBodyGroup') as THREE.Group) || carArrival;
-    const arrivalPassenger = buildCharacterMesh(CHARACTERS[2]);
-    arrivalPassenger.scale.setScalar(0.84);
-    arrivalPassenger.position.set(0.46, 0.17, 0.04);
-    applySeatedDriverPose(arrivalPassenger, 1.0, 0);
-    arrivalBody.add(arrivalPassenger);
-    scene.add(carArrival);
-    streetVehiclesRef.current.push({
-      mesh: carArrival,
-      carBody: arrivalBody,
-      passenger: arrivalPassenger,
-      speed: 6.0,
-      laneZ: -43.4,
-      direction: -1,
-      isArrival: true,
-      frontWheelL: carArrival.getObjectByName('frontWheelLeft') as THREE.Group,
-      frontWheelR: carArrival.getObjectByName('frontWheelRight') as THREE.Group,
-      door: carArrival.getObjectByName('passengerDoor') as THREE.Group,
-      taillight: carArrival.getObjectByName('taillight') as THREE.Mesh,
-    });
+
   }
-
-  // 4. Backyard Playground Basketball Hoop (west blacktop behind school)
-  const hoopGroup = new THREE.Group();
-  hoopGroup.position.set(-11.5, 0, -2.5);
-  const hoopPole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.12, 0.12, 5.5, 16),
-    new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.5 })
-  );
-  hoopPole.position.y = 2.75;
-  hoopPole.castShadow = true;
-  hoopGroup.add(hoopPole);
-
-  const backboard = new THREE.Mesh(
-    new THREE.BoxGeometry(2.2, 1.6, 0.1),
-    new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.3 })
-  );
-  backboard.position.set(0.6, 4.8, 0);
-  hoopGroup.add(backboard);
-
-  const orangeRim = new THREE.Mesh(
-    new THREE.TorusGeometry(0.42, 0.04, 8, 24).rotateX(Math.PI / 2),
-    new THREE.MeshStandardMaterial({ color: '#ea580c', roughness: 0.4 })
-  );
-  orangeRim.position.set(1.1, 4.4, 0);
-  hoopGroup.add(orangeRim);
-  scene.add(hoopGroup);
-
-  // 5. Suburban Neighborhood Houses across the front street (z = -52)
-  for (let h = -24; h <= 24; h += 8) {
-    const house = createSuburbanHouse(h % 2 === 0 ? '#334155' : '#475569');
-    house.position.set(h, 0, -52);
-    scene.add(house);
-  }
-
-  // Utility Poles along Maple Street
-  [-16, 0, 16].forEach((tx) => {
-    const telPole = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.14, 0.16, 9.0, 12),
-      new THREE.MeshStandardMaterial({ color: '#52341b', roughness: 0.9 })
-    );
-    telPole.position.set(tx, 4.5, -46);
-    telPole.castShadow = true;
-    scene.add(telPole);
-  });
-
-  // 6. Front Curbside Seating & Drop-Off Promenade
-  const curbsideZone = createCurbsidePromenade();
-  scene.add(curbsideZone);
-
-  // 7. West Team Pavilion (flanking the backyard court at x = -9.6)
-  const westPavilion = createTeamPavilion('★ WEST CONTENDERS PAVILION ★', '#1e3a8a', '#1d4ed8');
-  westPavilion.position.set(-9.6, 0, 0);
-  westPavilion.rotation.y = Math.PI / 2;
-  scene.add(westPavilion);
-
-  // 8. East Team Pavilion (flanking the backyard court at x = +9.6)
-  const eastPavilion = createTeamPavilion('★ EAST CHAMPIONS PAVILION ★', '#7c2d12', '#b91c1c');
-  eastPavilion.position.set(9.6, 0, 0);
-  eastPavilion.rotation.y = -Math.PI / 2;
-  scene.add(eastPavilion);
-
-  // 9. Low Sideline Boundary Guides (clear open backyard view at x = ±6.4)
-  [-6.4, 6.4].forEach((nx) => {
-    const net = new THREE.Mesh(
-      new THREE.PlaneGeometry(11.0, 2.2),
-      new THREE.MeshBasicMaterial({ color: '#94a3b8', wireframe: true, transparent: true, opacity: 0.28 })
-    );
-    net.position.set(nx, 1.1, 0);
-    net.rotation.y = Math.PI / 2;
-    scene.add(net);
-  });
 
   // 10. Official Tournament Referee
   const refPerson = buildRefereeModel();
-  refPerson.position.set(5.6, 0, 4.4);
-  refPerson.lookAt(0, 0.5, 0);
+  refPerson.position.set(5.8, 0.018, 0);
+  refPerson.lookAt(0, refPerson.position.y, 0);
   scene.add(refPerson);
   refereeMeshRef.current = refPerson;
 
   globalPhysics.addCylinder({
     id: 'referee',
     type: 'person',
-    x: 5.6,
-    z: 4.4,
+    x: refPerson.position.x,
+    z: refPerson.position.z,
     radius: 0.45,
     height: 1.8,
     isStatic: true,
   });
 
   const spectatorConfigs = [
-    // West Team Bleachers (x = -9.3)
-    { x: -9.3, z: -1.6, shirt: 0xf43f5e, pants: 0x1e293b, skin: 0xf2d6b3, hair: 0x1e293b, cheering: true },
-    { x: -9.3, z: -0.5, shirt: 0x10b981, pants: 0x334155, skin: 0xb45309, hair: 0x09090b, hasHat: true },
-    { x: -9.3, z: 0.6, shirt: 0x3b82f6, pants: 0x0f172a, skin: 0xffdbac, hair: 0xd97706, cheering: true },
-    { x: -9.3, z: 1.8, shirt: 0xf59e0b, pants: 0x475569, skin: 0xc68642, hair: 0x1e293b, cheering: false },
-    // East Champions Bleachers (x = +9.3)
-    { x: 9.3, z: -1.5, shirt: 0x8b5cf6, pants: 0x1e1b4b, skin: 0xe0ac69, hair: 0x7c2d12, cheering: true },
-    { x: 9.3, z: -0.3, shirt: 0xec4899, pants: 0x1e293b, skin: 0xfbbf24, hair: 0x78350f, hasHat: true },
-    { x: 9.3, z: 0.9, shirt: 0x06b6d4, pants: 0x334155, skin: 0x8d5524, hair: 0x09090b, cheering: true },
-    { x: 9.3, z: 2.0, shirt: 0x22c55e, pants: 0x1e293b, skin: 0xf1c27d, hair: 0x451a03, cheering: false },
-    // Rear School Walkway Spectators watching from behind the school (z = -6.2)
-    { x: -3.8, z: -6.2, shirt: 0xeab308, pants: 0x1e293b, skin: 0xf2d6b3, hair: 0x1e293b, cheering: true },
-    { x: 3.8, z: -6.2, shirt: 0xef4444, pants: 0x334155, skin: 0xb45309, hair: 0x09090b, cheering: true },
+    { x: -7.2, z: -3.4, shirt: 0xb15f55, pants: 0x323638, skin: 0xf2d6b3, hair: 0x312822 },
+    { x: -7.5, z: -1.9, shirt: 0x527163, pants: 0x334155, skin: 0xb17955, hair: 0x191917 },
+    { x: -7.1, z: -0.35, shirt: 0x6b7f8b, pants: 0x282f32, skin: 0xffdbac, hair: 0x805936 },
+    { x: -7.4, z: 1.2, shirt: 0xaa925a, pants: 0x33383d, skin: 0x73442e, hair: 0x271913 },
+    { x: -7.5, z: 2.75, shirt: 0x685371, pants: 0x344048, skin: 0xd49372, hair: 0x30201c },
+    { x: 7.6, z: -3.25, shirt: 0x3c5c74, pants: 0x282e33, skin: 0xa76747, hair: 0x4a3021 },
+    { x: 7.85, z: -1.6, shirt: 0xb99178, pants: 0x39372e, skin: 0xeabb96, hair: 0x775438 },
   ];
-
 
   spectatorsRef.current = [];
   spectatorConfigs.forEach((spec, i) => {
@@ -3794,11 +2970,9 @@ function buildVenueEnvironment(
       pantsColor: spec.pants,
       skinColor: spec.skin,
       hairColor: spec.hair,
-      hasHat: spec.hasHat,
-      cheering: spec.cheering,
     });
     fan.position.set(spec.x, 0, spec.z);
-    fan.lookAt(0, 0.5, 0);
+    fan.lookAt(0, fan.position.y, 0);
     scene.add(fan);
     spectatorsRef.current.push(fan);
 
@@ -3816,10 +2990,12 @@ function buildVenueEnvironment(
   // 11. Venue Specific Schoolyard NPCs
   npcsRef.current = [];
   if (venue && venue.npcs) {
-    venue.npcs.forEach((npc) => {
+    venue.npcs.forEach((npc, index) => {
+      const position = campusNpcSpot(index);
       const npcChar = CHARACTERS.find((c) => c.id === npc.characterId) || CHARACTERS[1];
       const npcMesh = buildCharacterMesh(npcChar);
-      npcMesh.position.set(npc.position[0], 0, npc.position[2]);
+      npcMesh.position.set(...position);
+      npcMesh.userData.campaignNpc = { ...npc, position };
       npcMesh.lookAt(0, 0.5, 0);
 
       // Name Tag billboard
@@ -3844,8 +3020,8 @@ function buildVenueEnvironment(
       globalPhysics.addCylinder({
         id: npc.id,
         type: 'person',
-        x: npc.position[0],
-        z: npc.position[2],
+        x: position[0],
+        z: position[2],
         radius: 0.45,
         height: 1.75,
         isStatic: true,
@@ -3855,290 +3031,28 @@ function buildVenueEnvironment(
 }
 
 // -------------------------------------------------------------
-// Helper: Suburban House for Background
-// -------------------------------------------------------------
-function createSuburbanHouse(roofColor: string): THREE.Group {
-  const grp = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(6.5, 3.8, 5.0),
-    new THREE.MeshStandardMaterial({ color: '#e2e8f0', roughness: 0.8 })
-  );
-  body.position.y = 1.9;
-  grp.add(body);
-
-  const roof = new THREE.Mesh(
-    new THREE.ConeGeometry(5.2, 2.4, 4).rotateY(Math.PI / 4),
-    new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.7 })
-  );
-  roof.position.y = 4.8;
-  grp.add(roof);
-
-  return grp;
-}
-
-// -------------------------------------------------------------
-// Helper: Wooden Bench
-// -------------------------------------------------------------
-function createWoodenBench(): THREE.Group {
-  const grp = new THREE.Group();
-  const woodMat = new THREE.MeshStandardMaterial({ color: '#b45309', roughness: 0.8 });
-  const legMat = new THREE.MeshStandardMaterial({ color: '#1e293b' });
-
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.1, 0.6), woodMat);
-  seat.position.set(0, 0.45, 0);
-  seat.castShadow = true;
-  grp.add(seat);
-
-  const back = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.4, 0.08), woodMat);
-  back.position.set(0, 0.85, -0.26);
-  back.castShadow = true;
-  grp.add(back);
-
-  const leg1 = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.45, 0.5), legMat);
-  leg1.position.set(-1.2, 0.225, 0);
-  const leg2 = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.45, 0.5), legMat);
-  leg2.position.set(1.2, 0.225, 0);
-  grp.add(leg1, leg2);
-
-  return grp;
-}
-
-// -------------------------------------------------------------
-// Helper: Team Pavilion with Shaded Canopy & 2-Tier Bleachers
-// -------------------------------------------------------------
-function createTeamPavilion(title: string, canopyColor: string, bannerColor: string): THREE.Group {
-  const grp = new THREE.Group();
-
-  // 4 Support Steel Posts
-  const postMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.8, roughness: 0.3 });
-  [[-1.8, -1.2], [1.8, -1.2], [-1.8, 1.2], [1.8, 1.2]].forEach(([px, pz]) => {
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.4, 12), postMat);
-    post.position.set(px, 1.7, pz);
-    post.castShadow = true;
-    grp.add(post);
-  });
-
-  // Modern Angled Canopy Awning
-  const canopy = new THREE.Mesh(
-    new THREE.BoxGeometry(4.2, 0.14, 2.9),
-    new THREE.MeshStandardMaterial({ color: canopyColor, roughness: 0.4, metalness: 0.2 })
-  );
-  canopy.position.set(0, 3.4, 0);
-  canopy.rotation.x = -0.05;
-  canopy.castShadow = true;
-  grp.add(canopy);
-
-  // Tournament Pavilion Banner
-  const bannerTex = createSafeCanvasTexture(512, 96, (bctx) => {
-    bctx.fillStyle = bannerColor;
-    bctx.fillRect(0, 0, 512, 96);
-    bctx.strokeStyle = '#facc15';
-    bctx.lineWidth = 5;
-    bctx.strokeRect(3, 3, 506, 90);
-    bctx.fillStyle = '#ffffff';
-    bctx.font = 'bold 24px sans-serif';
-    bctx.textAlign = 'center';
-    bctx.textBaseline = 'middle';
-    bctx.fillText(title, 256, 48);
-  });
-  const banner = new THREE.Mesh(
-    new THREE.PlaneGeometry(3.8, 0.65),
-    new THREE.MeshStandardMaterial({ map: bannerTex, roughness: 0.4 })
-  );
-  banner.position.set(0, 3.0, 1.42);
-  grp.add(banner);
-
-  // 2-Tier Aluminum Bleacher Seating inside pavilion
-  const bleacherMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.85, roughness: 0.2 });
-  // Tier 1 Bench (Forward)
-  const tier1 = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.1, 0.45), bleacherMat);
-  tier1.position.set(0, 0.45, 0.4);
-  tier1.castShadow = true;
-  // Tier 2 Bench (Elevated & set back)
-  const tier2 = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.1, 0.45), bleacherMat);
-  tier2.position.set(0, 0.85, -0.4);
-  tier2.castShadow = true;
-
-  // Support Frames
-  [-1.4, 0, 1.4].forEach((fx) => {
-    const f1 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.45, 0.45), postMat);
-    f1.position.set(fx, 0.225, 0.4);
-    const f2 = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.85, 0.45), postMat);
-    f2.position.set(fx, 0.425, -0.4);
-    grp.add(f1, f2);
-  });
-
-  grp.add(tier1, tier2);
-
-  // Sports Hydration Cooler Barrel
-  const coolerMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.4 });
-  const cooler = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.22, 0.65, 14), coolerMat);
-  cooler.position.set(-1.4, 0.325, 0.95);
-  cooler.castShadow = true;
-  grp.add(cooler);
-
-  return grp;
-}
-
-// -------------------------------------------------------------
-// Helper: Curbside Seating & Drop-Off Promenade
-// -------------------------------------------------------------
-function createCurbsidePromenade(): THREE.Group {
-  const grp = new THREE.Group();
-
-  // Curbside Wooden Bench inside front school gate
-  const bench = createWoodenBench();
-  bench.position.set(2.5, 0.1, -37.5);
-  bench.rotation.y = Math.PI;
-  grp.add(bench);
-
-  // Dual Sports Duffel Bags at curbside
-  const bag1 = new THREE.Mesh(
-    new THREE.BoxGeometry(0.7, 0.35, 0.35),
-    new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.7 })
-  );
-  bag1.position.set(0.6, 0.25, -37.5);
-  const bag2 = new THREE.Mesh(
-    new THREE.BoxGeometry(0.6, 0.3, 0.3),
-    new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.7 })
-  );
-  bag2.position.set(0.6, 0.2, -38.0);
-  bag2.rotation.y = 0.4;
-  grp.add(bag1, bag2);
-
-  // Modern Curbside Lamppost
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.85 });
-  const lampPole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 4.8, 12), poleMat);
-  lampPole.position.set(4.5, 2.4, -37.5);
-  const lampArm = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.08, 0.08), poleMat);
-  lampArm.position.set(4.1, 4.75, -37.5);
-  const lampHead = new THREE.Mesh(
-    new THREE.BoxGeometry(0.35, 0.15, 0.25),
-    new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfef08a, emissiveIntensity: 0.6 })
-  );
-  lampHead.position.set(3.7, 4.65, -37.5);
-  grp.add(lampPole, lampArm, lampHead);
-
-  return grp;
-}
-
-// -------------------------------------------------------------
-// Helper: Build Four Square Court
+// Shared markings and hit targets for the playable court.
 // -------------------------------------------------------------
 function buildCourt(
   scene: THREE.Scene,
   squaresRef: React.MutableRefObject<Map<SquareId, THREE.Mesh>>,
-  highlightsRef: React.MutableRefObject<Map<SquareId, THREE.Mesh>>
+  highlightsRef: React.MutableRefObject<Map<SquareId, THREE.Mesh>>,
+  venueId?: VenueDef['id'],
 ) {
-  const quadSize = COURT_HALF_SIZE;
-
-  // Colors matching image_916b0c2b.png:
-  // Square 1: Blue (#2563EB) with yellow diagonal serve box corner & yellow number 1
-  // Square 2: Green (#16A34A) with yellow number 2
-  // Square 3: Yellow-Orange (#F59E0B) with yellow number 3
-  // Square 4: Red (#DC2626) with yellow number 4
-  const squareColors: Record<SquareId, number> = {
-    1: 0x2563eb, // Blue (Serve Square)
-    2: 0x16a34a, // Green
-    3: 0xf59e0b, // Yellow-Orange
-    4: 0xdc2626, // Red
-  };
-
-  // Quadrant placement in 3D world (Camera looks from +Z toward -Z):
-  // Square 1: Bottom-Left [-quadSize / 2, quadSize / 2]
-  // Square 2: Top-Left [-quadSize / 2, -quadSize / 2]
-  // Square 3: Top-Right [quadSize / 2, -quadSize / 2]
-  // Square 4: Bottom-Right [quadSize / 2, quadSize / 2]
-  const positions: Record<SquareId, [number, number]> = {
-    1: [-quadSize / 2, quadSize / 2],
-    2: [-quadSize / 2, -quadSize / 2],
-    3: [quadSize / 2, -quadSize / 2],
-    4: [quadSize / 2, quadSize / 2],
-  };
-
-  ([1, 2, 3, 4] as SquareId[]).forEach((sqId) => {
-    const [posX, posZ] = positions[sqId];
-
-    const sqTex = createSafeCanvasTexture(256, 256, (ctx) => {
-      const colorHex = '#' + squareColors[sqId].toString(16).padStart(6, '0');
-      ctx.fillStyle = colorHex;
-      ctx.fillRect(0, 0, 256, 256);
-
-      // Painted thick yellow border around each square
-      ctx.strokeStyle = '#facc15';
-      ctx.lineWidth = 14;
-      ctx.strokeRect(7, 7, 242, 242);
-
-      // Diagonal yellow serve box line for Square 1 (matching image_916b0c2b.png)
-      if (sqId === 1) {
-        ctx.beginPath();
-        ctx.moveTo(0, 168);
-        ctx.lineTo(168, 256);
-        ctx.strokeStyle = '#facc15';
-        ctx.lineWidth = 14;
-        ctx.stroke();
-      }
-
-      // Bold painted yellow numbers
-      ctx.fillStyle = '#facc15';
-      ctx.font = '900 115px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-      ctx.shadowBlur = 4;
-      ctx.fillText(sqId.toString(), 128, 128);
-    });
-
-    const sqGeo = new THREE.PlaneGeometry(quadSize - LINE_HALF_WIDTH * 2, quadSize - LINE_HALF_WIDTH * 2);
-    sqGeo.rotateX(-Math.PI / 2);
-
-    const sqMat = new THREE.MeshStandardMaterial({
-      map: sqTex,
-      roughness: 0.7,
-      metalness: 0.05,
-    });
-    const sqMesh = new THREE.Mesh(sqGeo, sqMat);
-    sqMesh.name = `courtSquare-${sqId}`;
-    sqMesh.position.set(posX, 0.025, posZ);
-    sqMesh.receiveShadow = true;
-    scene.add(sqMesh);
-    squaresRef.current.set(sqId, sqMesh);
-
-    // Dynamic Turn Glow Highlight
-    const hlGeo = new THREE.PlaneGeometry(quadSize, quadSize);
-    hlGeo.rotateX(-Math.PI / 2);
-    const hlMat = new THREE.MeshBasicMaterial({
-      color: 0xfef08a,
-      transparent: true,
-      opacity: 0.45,
-      side: THREE.DoubleSide,
-    });
-    const hlMesh = new THREE.Mesh(hlGeo, hlMat);
-    hlMesh.position.set(posX, 0.038, posZ);
-    hlMesh.visible = false;
-    scene.add(hlMesh);
-    highlightsRef.current.set(sqId, hlMesh);
-  });
-
-  // Thick Yellow Court Border Lines & Cross Dividers
-  const fullCourtSize = COURT_HALF_SIZE * 2;
-  const lineMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.5 });
-  const borderH1 = new THREE.Mesh(new THREE.PlaneGeometry(fullCourtSize + 0.2, 0.18).rotateX(-Math.PI / 2), lineMat);
-  borderH1.position.set(0, 0.03, -COURT_HALF_SIZE);
-  const borderH2 = new THREE.Mesh(new THREE.PlaneGeometry(fullCourtSize + 0.2, 0.18).rotateX(-Math.PI / 2), lineMat);
-  borderH2.position.set(0, 0.03, COURT_HALF_SIZE);
-  const borderV1 = new THREE.Mesh(new THREE.PlaneGeometry(0.18, fullCourtSize + 0.2).rotateX(-Math.PI / 2), lineMat);
-  borderV1.position.set(-COURT_HALF_SIZE, 0.03, 0);
-  const borderV2 = new THREE.Mesh(new THREE.PlaneGeometry(0.18, fullCourtSize + 0.2).rotateX(-Math.PI / 2), lineMat);
-  borderV2.position.set(COURT_HALF_SIZE, 0.03, 0);
-
-  // Center Cross Dividers
-  const centerH = new THREE.Mesh(new THREE.PlaneGeometry(fullCourtSize, 0.22).rotateX(-Math.PI / 2), lineMat);
-  centerH.position.set(0, 0.032, 0);
-  const centerV = new THREE.Mesh(new THREE.PlaneGeometry(0.22, fullCourtSize).rotateX(-Math.PI / 2), lineMat);
-  centerV.position.set(0, 0.032, 0);
-
-  scene.add(borderH1, borderH2, borderV1, borderV2, centerH, centerV);
+  const { group, squareMeshes } = buildCampusCourt(venueId);
+  scene.add(group);
+  for (const [id, mesh] of squareMeshes) {
+    squaresRef.current.set(id, mesh);
+    const glow = new THREE.Mesh(
+      new THREE.PlaneGeometry(COURT_HALF_SIZE, COURT_HALF_SIZE).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: 0xeac971, transparent: true, opacity: 0.38, depthWrite: false }),
+    );
+    glow.position.set(mesh.position.x, 0.038, mesh.position.z);
+    glow.visible = false;
+    group.add(glow);
+    highlightsRef.current.set(id, glow);
+  }
+  return group;
 }
 
 // -------------------------------------------------------------
@@ -4147,25 +3061,11 @@ function buildCourt(
 function buildBall(
   scene: THREE.Scene,
   ballRef: React.MutableRefObject<THREE.Mesh | null>,
-  shadowRef: React.MutableRefObject<THREE.Mesh | null>
+  shadowRef: React.MutableRefObject<THREE.Mesh | null>,
+  look?: BallLook,
 ) {
   const ballGeo = new THREE.SphereGeometry(0.22, 28, 28);
-  const ballTex = createSafeCanvasTexture(256, 256, (ctx) => {
-    ctx.fillStyle = '#dc2626';
-    ctx.fillRect(0, 0, 256, 256);
-    ctx.fillStyle = '#b91c1c';
-    for (let x = 0; x < 256; x += 16) {
-      for (let y = 0; y < 256; y += 16) {
-        ctx.fillRect(x, y, 8, 8);
-      }
-    }
-  });
-
-  const ballMat = new THREE.MeshStandardMaterial({
-    map: ballTex,
-    roughness: 0.65,
-    metalness: 0.1,
-  });
+  const ballMat = courtBallMaterial(look);
   const ball = new THREE.Mesh(ballGeo, ballMat);
   ball.castShadow = true;
   ball.position.set(0, 0.22, 0);
@@ -4189,8 +3089,9 @@ function buildBall(
 // Helpers: Court Footwork, Player Clarity Badges & Strike FX
 // -------------------------------------------------------------
 function getSquarePlayBounds(sqId: SquareId) {
-  const isLeft = sqId === 1 || sqId === 2;
-  const isTop = sqId === 2 || sqId === 3;
+  const [x, z] = SQUARE_CONFIGS[sqId].center;
+  const isLeft = x < 0;
+  const isTop = z < 0;
   return {
     minX: isLeft ? -4.45 : 0.55,
     maxX: isLeft ? -0.55 : 4.45,
@@ -4203,6 +3104,20 @@ function lerpAngle(current: number, target: number, t: number): number {
   let diff = ((target - current + Math.PI) % (Math.PI * 2)) - Math.PI;
   if (diff < -Math.PI) diff += Math.PI * 2;
   return current + diff * t;
+}
+
+function aimStrikePalm(arm: THREE.Group, contact: THREE.Vector3, weight: number) {
+  const hand = arm.getObjectByName('strikeHand');
+  const parent = arm.parent;
+  if (!hand || !parent) return;
+  const palm = hand.localToWorld(new THREE.Vector3(0, -0.045, 0));
+  const palmDirection = parent.worldToLocal(palm).sub(arm.position).normalize();
+  const shoulder = arm.getWorldPosition(new THREE.Vector3());
+  const ballSurface = contact.clone().lerp(shoulder, Math.min(1, BALL_RADIUS / Math.max(BALL_RADIUS, shoulder.distanceTo(contact))));
+  const strikeDirection = parent.worldToLocal(ballSurface).sub(arm.position).normalize();
+  if (!strikeDirection.lengthSq() || !palmDirection.lengthSq()) return;
+  const correction = new THREE.Quaternion().setFromUnitVectors(palmDirection, strikeDirection);
+  arm.quaternion.slerp(correction.multiply(arm.quaternion), weight);
 }
 
 function applyFootworkGait(grp: THREE.Group, speed: number, elapsed: number) {
@@ -4224,7 +3139,7 @@ function applyFootworkGait(grp: THREE.Group, speed: number, elapsed: number) {
     if (leftArm) leftArm.rotation.x = -0.25 - cycle * strideAmp * 0.7;
     if (rightArm) rightArm.rotation.x = -0.25 + cycle * strideAmp * 0.7;
     if (torso) torso.rotation.x = THREE.MathUtils.lerp(torso.rotation.x, 0.14, 0.2);
-    grp.position.y = Math.abs(cycle) * 0.04;
+    grp.position.y = 0.035 + Math.abs(cycle) * 0.04;
   } else {
     if (leftLeg) leftLeg.rotation.x = THREE.MathUtils.lerp(leftLeg.rotation.x, 0, 0.22);
     if (rightLeg) rightLeg.rotation.x = THREE.MathUtils.lerp(rightLeg.rotation.x, 0, 0.22);
@@ -4233,7 +3148,7 @@ function applyFootworkGait(grp: THREE.Group, speed: number, elapsed: number) {
     if (leftArm) leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, -0.25, 0.2);
     if (rightArm) rightArm.rotation.x = THREE.MathUtils.lerp(rightArm.rotation.x, -0.25, 0.2);
     if (torso) torso.rotation.x = THREE.MathUtils.lerp(torso.rotation.x, 0, 0.2);
-    grp.position.y = THREE.MathUtils.lerp(grp.position.y, 0, 0.25);
+    grp.position.y = THREE.MathUtils.lerp(grp.position.y, 0.035, 0.25);
   }
 }
 

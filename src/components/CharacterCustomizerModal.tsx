@@ -41,7 +41,7 @@ import {
   PANTS_TYPES,
   SHOES_TYPES,
 } from '../utils/characters';
-import { buildCustomizablePlayerMesh } from '../utils/characterModelBuilder';
+import { buildCharacterMesh, buildCustomizablePlayerMesh } from '../utils/characterModelBuilder';
 import { ColorWheelPicker } from './ColorWheelPicker';
 import { FourSquareCoin } from './FourSquareCoin';
 
@@ -51,7 +51,9 @@ export interface CharacterCustomizerModalProps {
   onSave?: (customization: CharacterCustomization) => void;
   onSaveCustomization?: (customization: CharacterCustomization) => void;
   currentCustomization?: CharacterCustomization;
+  onOpenLocker?: () => void;
 }
+const STUDIO_POSES = ['Idle', 'Ready', 'Serve', 'Return', 'Celebrate'] as const;
 
 export const CREATURE_FORMS: {
   id: CreatureArchetype;
@@ -307,6 +309,7 @@ const PRESETS: { name: string; desc: string; icon: string; style: CharacterCusto
 type CustomizerTab = 'characters' | 'form' | 'jersey' | 'pants' | 'head' | 'accessories' | 'presets';
 
 export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> = ({
+  onOpenLocker,
   isOpen,
   onClose,
   onSave,
@@ -323,8 +326,42 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
   const [unlockedCreatures, setUnlockedCreatures] = useState<CreatureArchetype[]>(
     () => getUnlockedCreatureForms() as CreatureArchetype[]
   );
-  const [autoRotate, setAutoRotate] = useState(true);
-  const [zoomLevel, setZoomLevel] = useState(2.5);
+  const [autoRotate, setAutoRotate] = useState(false);
+  const autoRotateRef = useRef(autoRotate);
+  autoRotateRef.current = autoRotate;
+  const [preview, setPreview] = useState<{ character?: string; form?: CreatureArchetype }>();
+  const [motionMode, setMotionMode] = useState<typeof STUDIO_POSES[number]>('Ready');
+  const [cyclePoses, setCyclePoses] = useState(!window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  useEffect(() => {
+    if (!isOpen || !cyclePoses) return;
+    const timer = window.setInterval(() => setMotionMode((pose) => STUDIO_POSES[(STUDIO_POSES.indexOf(pose) + 1) % STUDIO_POSES.length]), 4600);
+    return () => window.clearInterval(timer);
+  }, [isOpen, cyclePoses]);
+  const motionRef = useRef(motionMode);
+  motionRef.current = motionMode;
+  const [logoError, setLogoError] = useState('');
+  const uploadLogo = async (file?: File) => {
+    if (!file) return;
+    setLogoError('');
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5_000_000) {
+      setLogoError('Choose a PNG, JPG, or WebP up to 5 MB.');
+      return;
+    }
+    try {
+      const image = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      const size = Math.max(image.width, image.height);
+      canvas.width = Math.max(1, Math.round(160 * image.width / size));
+      canvas.height = Math.max(1, Math.round(160 * image.height / size));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { image.close(); throw new Error(); }
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+      image.close();
+      const shirtLogo = canvas.toDataURL('image/png');
+      setCustom((previous) => ({ ...previous, shirtLogo, shirtPattern: 'logo' }));
+    } catch { setLogoError('That image could not be opened.'); }
+  };
+  const [zoomLevel, setZoomLevel] = useState(3.16);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -336,12 +373,14 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
   const lastMouseXRef = useRef(0);
 
   const equippedChar = CHARACTERS.find((c) => c.id === equippedCharId) || CHARACTERS[0];
+  const previewChar = CHARACTERS.find(({ id }) => id === preview?.character);
 
   useEffect(() => {
     if (isOpen) {
       setCustom(currentCustomization || getStoredCustomization());
       setEquippedCharId(getEquippedCharacterId());
       setCoins(getStoredCoins());
+      setPreview(undefined);
       setUnlockedIds(getUnlockedCharacterIds());
       setUnlockedCreatures(getUnlockedCreatureForms() as CreatureArchetype[]);
     }
@@ -372,23 +411,30 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
     rendererRef.current = renderer;
 
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
     // Lighting
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x1e293b, 1.4);
+    const hemiLight = new THREE.HemisphereLight(0xf3f8ff, 0x716255, 1.1);
     scene.add(hemiLight);
 
     const keyLight = new THREE.DirectionalLight(0xfffbeb, 1.8);
     keyLight.position.set(2, 4, 3);
     keyLight.castShadow = true;
+    keyLight.shadow.normalBias = 0.012;
     scene.add(keyLight);
 
     const rimLight = new THREE.DirectionalLight(0x38bdf8, 1.1);
     rimLight.position.set(-2, 2, -2);
     scene.add(rimLight);
+    const faceFill = new THREE.DirectionalLight(0xe4f0ff, 0.52);
+    faceFill.position.set(-3.6, 1.8, 5);
+    scene.add(faceFill);
 
     // Mini Court Turntable Platform
     const platformGeo = new THREE.CylinderGeometry(0.9, 1.0, 0.1, 32);
@@ -417,6 +463,8 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
     scene.add(charMesh);
     characterGroupRef.current = charMesh;
 
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.135, 22, 18), new THREE.MeshStandardMaterial({ color: 0xb84739, roughness: 0.75 }));
+    scene.add(ball);
     let animationFrameId: number;
     let clock = new THREE.Clock();
 
@@ -425,11 +473,26 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
       const elapsed = clock.getElapsedTime();
 
       if (characterGroupRef.current) {
-        if (autoRotate && !isDraggingRef.current) {
+        if (autoRotateRef.current && !isDraggingRef.current) {
           rotationYRef.current += 0.008;
         }
         characterGroupRef.current.rotation.y = rotationYRef.current;
-        characterGroupRef.current.position.y = Math.sin(elapsed * 2.5) * 0.015;
+        const character = characterGroupRef.current;
+        const pose = motionRef.current;
+        const wave = Math.sin(elapsed * 3.2);
+        character.position.y = pose === 'Celebrate' ? Math.max(0, wave) * .14 : (1 + wave) * .009;
+        const upperArm = character.getObjectByName('rightArm');
+        const forearm = character.getObjectByName('rightForearm');
+        const leftArm = character.getObjectByName('leftArm');
+        const torso = character.getObjectByName('torsoMesh');
+        const armAngle = { Idle: -.18, Ready: -.56, Serve: -.94 - wave * .65, Return: -.75 - wave * .56, Celebrate: -2.35 - wave * .3 }[pose];
+        if (upperArm) upperArm.rotation.x = THREE.MathUtils.lerp(upperArm.rotation.x, armAngle, .13);
+        if (forearm) forearm.rotation.x = THREE.MathUtils.lerp(forearm.rotation.x, pose === 'Idle' ? -.35 : -.65, .13);
+        if (leftArm) leftArm.rotation.x = THREE.MathUtils.lerp(leftArm.rotation.x, pose === 'Celebrate' ? -2.4 : -.2 + wave * .1, .13);
+        if (torso) torso.rotation.x = THREE.MathUtils.lerp(torso.rotation.x, pose === 'Return' ? .21 : 0, .13);
+        const hand = character.getObjectByName('strikeHand');
+        if (hand) hand.localToWorld(ball.position.set(0.015, -0.055, 0.11));
+        else character.localToWorld(ball.position.set(0.27, 0.70, 0.26));
       }
       renderer.render(scene, camera);
     };
@@ -469,12 +532,12 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
       scene.remove(characterGroupRef.current);
     }
 
-    const newMesh = buildCustomizablePlayerMesh(equippedChar, custom);
+    const newMesh = previewChar ? (activeTab==='jersey' ? buildCustomizablePlayerMesh(previewChar,{...custom,creatureArchetype:'athlete'}) : buildCharacterMesh(previewChar)) : buildCustomizablePlayerMesh(equippedChar, preview?.form ? { ...custom, creatureArchetype: preview.form } : custom);
     newMesh.position.set(0, 0, 0);
     newMesh.rotation.y = rotationYRef.current;
     scene.add(newMesh);
     characterGroupRef.current = newMesh;
-  }, [custom, equippedChar]);
+  }, [custom, equippedChar, previewChar, preview?.form, activeTab]);
 
   // Update Zoom
   useEffect(() => {
@@ -485,9 +548,10 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
 
   // Mouse / Touch Drag to Spin Character
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0 || !e.isPrimary) return;
     isDraggingRef.current = true;
     lastMouseXRef.current = e.clientX;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -500,7 +564,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
   const handlePointerUp = (e: React.PointerEvent) => {
     isDraggingRef.current = false;
     try {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
   };
 
@@ -511,7 +575,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
   const handleRandomize = () => {
     soundFX.playClick();
     const colors = ['#2563EB', '#EF4444', '#F59E0B', '#10B981', '#06B6D4', '#8B5CF6', '#EC4899', '#F97316', '#FACC15', '#0F172A'];
-    const patterns: CharacterCustomization['shirtPattern'][] = ['solid', 'split', 'striped', 'drip', 'geometric'];
+    const patterns: CharacterCustomization['shirtPattern'][] = ['solid', 'split', 'striped', 'drip', 'geometric', 'checker', 'hoops'];
     const hats: CharacterCustomization['hatType'][] = ['none', 'backwards_cap', 'headband', 'beanie', 'crown'];
     const hairs: CharacterCustomization['hairStyle'][] = ['short', 'afro', 'spiky'];
 
@@ -539,7 +603,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
       hasWristbands: Math.random() > 0.4,
       wristbandColor: randomColor(),
       jerseyNumber: Math.floor(Math.random() * 99) + 1,
-      playerNickname: prev.playerNickname || 'King of Kanata',
+      playerNickname: prev.playerNickname,
     }));
   };
 
@@ -553,7 +617,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
 
   const handleResetDefaults = () => {
     soundFX.playClick();
-    setCustom(DEFAULT_CUSTOMIZATION);
+      setCustom({ ...DEFAULT_CUSTOMIZATION, playerNickname: custom.playerNickname });
   };
 
   if (!isOpen) return null;
@@ -569,7 +633,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
           <div className="px-3 py-1.5 rounded-xl bg-slate-900/90 border border-amber-400/40 backdrop-blur-md flex items-center gap-2 shadow-lg">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-xs font-black text-white uppercase tracking-wider">
-              {equippedChar.name}
+              {previewChar?.name ?? equippedChar.name}{preview && ' · Preview'}
             </span>
             <span className="text-[11px] text-amber-300 font-mono font-bold">#{custom.jerseyNumber ?? 4}</span>
           </div>
@@ -581,14 +645,26 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           className="w-full flex-1 cursor-grab active:cursor-grabbing touch-none"
         />
 
+        <div className="absolute left-4 top-12 z-20 flex gap-2">
+          <select aria-label="Preview pose" className="league-button bg-neutral-900" value={motionMode} onChange={(event) => {
+            setMotionMode(event.target.value as typeof motionMode);
+            setCyclePoses(false);
+          }}>{STUDIO_POSES.map((pose) => <option key={pose}>{pose}</option>)}</select>
+          <button className="league-button bg-neutral-900" aria-pressed={cyclePoses} onClick={() => setCyclePoses(!cyclePoses)}>Auto pose</button>
+          {onOpenLocker && <button className="league-button bg-neutral-900" onClick={onOpenLocker}>Locker</button>}
+          {preview && <button className="rounded-lg bg-neutral-900 p-2 text-sm" onClick={() => setPreview(undefined)}>End preview</button>}
+        </div>
         {/* Bottom 3D Viewport Controls Bar */}
         <div className="absolute bottom-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-none">
           <div className="flex items-center gap-1.5 bg-slate-900/90 backdrop-blur-md p-1.5 rounded-2xl border border-slate-800 shadow-xl pointer-events-auto">
             <button
               onClick={() => setAutoRotate((prev) => !prev)}
+              aria-pressed={autoRotate}
+              aria-label="Auto-rotate"
               className={`p-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                 autoRotate ? 'bg-amber-400 text-slate-950 shadow' : 'bg-slate-800 text-slate-300 hover:text-white'
               }`}
@@ -642,16 +718,13 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
             <div>
               <h2 className="text-xl font-black text-white flex items-center gap-2">
                 <span>Character Studio</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                  Full Suite
-                </span>
               </h2>
-              <div className="text-xs text-slate-400">Color Wheels • Hex & Decimal Codes • Style Presets</div>
             </div>
           </div>
 
           <button
             onClick={onClose}
+            aria-label="Close Character Studio"
             className="p-2 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
@@ -667,7 +740,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
             }`}
           >
             <Crown className="w-4 h-4 text-amber-500" />
-            <span>Characters (10)</span>
+            <span>Roster</span>
           </button>
 
           <button
@@ -677,7 +750,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
             }`}
           >
             <Sparkles className="w-4 h-4 text-purple-400" />
-            <span>Creature Form</span>
+            <span>Body</span>
           </button>
 
           <button
@@ -687,7 +760,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
             }`}
           >
             <Shirt className="w-4 h-4" />
-            <span>Jersey & Shirt</span>
+            <span>Jersey</span>
           </button>
 
           <button
@@ -739,10 +812,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
               <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <div>
                   <div className="text-xs font-black uppercase tracking-wider text-amber-400">
-                    Character Studio & Roster
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    Select & unlock from 10 distinct competitors.
+                      Roster
                   </div>
                 </div>
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-400/10 border border-amber-400/30 text-amber-300 font-black text-sm">
@@ -774,14 +844,11 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                             {index < 3 ? 'FREE' : <><FourSquareCoin size={12} /><span>{char.price}</span></>}
                           </span>
                         </div>
-                        <p className="text-xs text-slate-400 mb-2 line-clamp-2">{char.description}</p>
                       </div>
 
                       <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
-                        <div className="text-[10px] text-slate-400 font-mono">
-                          SPD:{char.speed} | PWR:{char.power} | SPN:{char.spin}
-                        </div>
 
+                        {!isEquipped && <button className="text-xs text-stone-200 hover:text-amber-200" onClick={() => setPreview({ character: char.id })}>Preview</button>}
                         {isEquipped ? (
                           <span className="px-3 py-1 rounded-xl bg-amber-400 text-slate-950 font-black text-xs">
                             Equipped
@@ -790,6 +857,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                           <button
                             onClick={() => {
                               soundFX.playClick();
+                              setPreview(undefined);
                               setEquippedCharId(char.id);
                               setEquippedCharacterId(char.id);
                             }}
@@ -807,7 +875,8 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                                 saveStoredCoins(newBalance);
                                 const newUnlocked = unlockCharacter(char.id);
                                 setUnlockedIds(newUnlocked);
-                                setEquippedCharId(char.id);
+                                setPreview(undefined);
+                              setEquippedCharId(char.id);
                                 setEquippedCharacterId(char.id);
                               } else {
                                 soundFX.playWhistle();
@@ -819,7 +888,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                                 : 'bg-slate-800 text-slate-500 cursor-not-allowed'
                             }`}
                           >
-                            Unlock ({char.price} 🪙)
+                            Unlock
                           </button>
                         )}
                       </div>
@@ -899,6 +968,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                             )}
                           </div>
 
+                          <button className="text-xs text-stone-200 hover:text-amber-200" onClick={() => setPreview({ form: form.id })}>Preview</button>
                           {isSelected ? (
                             <span className="px-3 py-1 rounded-xl bg-amber-400 text-slate-950 font-black text-xs">
                               Selected
@@ -977,13 +1047,17 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
           {/* TAB 1: JERSEY & SHIRT */}
           {activeTab === 'jersey' && (
             <div className="space-y-6">
+              <label className="grid gap-2 text-sm font-bold">Display name
+                <input className="rounded-lg border border-white/20 bg-neutral-950 px-3 py-2" maxLength={24} value={custom.playerNickname ?? ''}
+                  onChange={(event) => setCustom((previous) => ({ ...previous, playerNickname: event.target.value }))}/>
+              </label>
               {/* Pattern Selection */}
               <div>
                 <label className="block text-xs font-black uppercase tracking-wider text-amber-400 mb-2.5">
-                  Jersey Pattern Style
+                  Pattern
                 </label>
                 <div className="grid grid-cols-5 gap-2">
-                  {(['solid', 'split', 'striped', 'drip', 'geometric'] as const).map((p) => (
+                  {(['solid', 'split', 'striped', 'drip', 'geometric', 'checker', 'hoops', ...(custom.shirtLogo ? ['logo'] : [])] as const).map((p) => (
                     <button
                       key={p}
                       onClick={() => { soundFX.playClick(); setCustom((prev) => ({ ...prev, shirtPattern: p })); }}
@@ -999,10 +1073,22 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
                 </div>
               </div>
 
+              <label className="grid gap-2 text-sm font-bold">
+                Jersey name
+                <input className="rounded-lg border border-white/20 bg-neutral-950 px-3 py-2" maxLength={14} value={custom.jerseyName ?? ''}
+                  onChange={(event) => setCustom((previous) => ({ ...previous, jerseyName: event.target.value }))}/>
+              </label>
+              <div className="grid gap-2 rounded-lg border border-white/15 p-3">
+                <label className="grid gap-2 text-sm font-semibold">Shirt logo
+                  <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => { void uploadLogo(event.currentTarget.files?.[0]); event.currentTarget.value = ''; }}/>
+                </label>
+                {logoError && <p role="alert" className="text-sm text-red-300">{logoError}</p>}
+                {custom.shirtLogo && <button className="league-button justify-self-start" onClick={() => setCustom((previous) => ({...previous, shirtLogo: undefined, shirtPattern: previous.shirtPattern === 'logo' ? 'solid' : previous.shirtPattern}))}>Remove logo</button>}
+              </div>
               {/* Jersey Number */}
               <div>
                 <label className="block text-xs font-black uppercase tracking-wider text-amber-400 mb-2">
-                  Jersey Number (0 - 99)
+                  Number
                 </label>
                 <div className="flex items-center gap-3">
                   <input
@@ -1021,7 +1107,7 @@ export const CharacterCustomizerModal: React.FC<CharacterCustomizerModalProps> =
 
               {/* Color Wheel 1: Primary Jersey Color */}
               <ColorWheelPicker
-                label="Primary Jersey Color"
+                label="Primary color"
                 color={custom.shirtColor || '#2563EB'}
                 onChange={(hex) => setCustom((prev) => ({ ...prev, shirtColor: hex }))}
               />

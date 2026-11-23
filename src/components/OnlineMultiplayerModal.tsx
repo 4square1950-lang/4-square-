@@ -1,13 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Globe, Users, Play, Send, CheckCircle2, ShieldCheck, Sparkles, Copy, Check, Gamepad2 } from 'lucide-react';
+import { preparePlayerSession } from '../services/marketClient';
+import { X, Globe, Users, Play, Send, Copy, Check, Gamepad2, Hash } from 'lucide-react';
 import { CHARACTERS } from '../utils/characters';
+import { DEFAULT_LOCAL_PICKS, LOCAL_SEATS } from '../services/localMultiplayer';
+import type { MatchSnapshot, RoomChatMessage, RoomCommand, RoomEvent, RoomMember } from '../services/onlineProtocol';
 
 interface OnlineMultiplayerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onStartOnlineMatch: (roomData: { roomId: string; socket: WebSocket; mySquareId: number | null; myUserId: string }) => void;
-  onStartLocalMatch?: (playersConfig: Array<{ id: string; name: string; characterId: string; controlsLabel: string }>) => void;
+  onStartOnlineMatch: (socket: WebSocket, playerId: string, snapshot: MatchSnapshot) => void;
+  onStartLocalMatch?: (characterIds: string[]) => void;
   defaultTab?: 'online' | 'local';
+  tournamentRoom?: string;
+  profileName?: string;
 }
 
 export const OnlineMultiplayerModal: React.FC<OnlineMultiplayerModalProps> = ({
@@ -16,117 +21,120 @@ export const OnlineMultiplayerModal: React.FC<OnlineMultiplayerModalProps> = ({
   onStartOnlineMatch,
   onStartLocalMatch,
   defaultTab = 'online',
+  tournamentRoom,
+  profileName,
 }) => {
-  const [activeTab, setActiveTab] = useState<'online' | 'local'>(defaultTab);
+  const [selectedTab, setActiveTab] = useState<'online' | 'local'>(defaultTab);
+  const activeTab = tournamentRoom ? 'online' : selectedTab;
+  const roomInput = useRef<HTMLInputElement>(null);
+  const chatLog = useRef<HTMLDivElement>(null);
+  const [copyError, setCopyError] = useState(false);
 
   // Online Match State
-  const [roomId, setRoomId] = useState('COURT-402');
-  const [userName, setUserName] = useState('AceStriker');
+  const [ordinaryRoom, setRoomId] = useState('COURT-402');
+  const [guestName, setUserName] = useState('Player');
+  const roomId = tournamentRoom ?? ordinaryRoom;
+  const userName = profileName || guestName;
   const [selectedCharId, setSelectedCharId] = useState('char-patch');
-  const [isConnected, setIsConnected] = useState(false);
-  const [playersList, setPlayersList] = useState<Array<{ id: string; name: string; characterId: string; squareId: number | null; isHost: boolean }>>([]);
-  const [chatMessages, setChatMessages] = useState<Array<{ sender: string; text: string }>>([]);
+  const [playerId, setPlayerId] = useState<string | null>(null);
+  const [playersList, setPlayersList] = useState<RoomMember[]>([]);
+  const [chatMessages, setChatMessages] = useState<RoomChatMessage[]>([]);
+  const [connectionError, setConnectionError] = useState('');
   const [chatInput, setChatInput] = useState('');
-  const [mySquareId, setMySquareId] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
 
   // Local Pass & Play State
   const [playerCount, setPlayerCount] = useState<2 | 3 | 4>(2);
-  const [selectedLocalChars, setSelectedLocalChars] = useState<string[]>([
-    'char-patch',
-    'char-blocky',
-    'char-skater-roxy',
-    'char-fang-wolf',
-  ]);
+  const [selectedLocalChars, setSelectedLocalChars] = useState(() => [...DEFAULT_LOCAL_PICKS]);
 
   const socketRef = useRef<WebSocket | null>(null);
-  const myUserIdRef = useRef<string>(`usr-${Math.random().toString(36).slice(2, 8)}`);
-
-  const controlSchemes = [
-    { p: 1, name: 'Player 1', keys: 'WASD + Space / Click', color: 'text-rose-400', square: 'Square 1' },
-    { p: 2, name: 'Player 2', keys: 'Arrow Keys + Enter / 0', color: 'text-amber-400', square: 'Square 2' },
-    { p: 3, name: 'Player 3', keys: 'I J K L + Space / U', color: 'text-emerald-400', square: 'Square 3' },
-    { p: 4, name: 'Player 4', keys: 'T F G H + Enter / Y', color: 'text-blue-400', square: 'Square 4' },
-  ];
+  const startMatchRef = useRef(onStartOnlineMatch);
+  startMatchRef.current = onStartOnlineMatch;
+  const me = playersList.find((player) => player.id === playerId);
 
   useEffect(() => {
-    if (!isOpen) {
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
-      }
-      setIsConnected(false);
-      setPlayersList([]);
-      return;
-    }
+    setPlayerId(null);
+    setPlayersList([]);
+    setChatMessages([]);
+    setConnectionError('');
+    if (!isOpen || activeTab !== 'online' || !roomId.trim()) return;
 
-    if (activeTab === 'online') {
+    let socket: WebSocket | undefined;
+    let handedOff = false;
+    let cancelled = false;
+    const reconnect = window.setTimeout(async () => {
+      await preparePlayerSession().catch(() => {});
+      if (cancelled) return;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-      try {
-        const ws = new WebSocket(wsUrl);
-        socketRef.current = ws;
-
-        ws.onopen = () => {
-          setIsConnected(true);
-          ws.send(
-            JSON.stringify({
-              type: 'join_room',
-              payload: {
-                roomId: roomId.trim().toUpperCase(),
-                userId: myUserIdRef.current,
-                userName,
-                characterId: selectedCharId,
-                venueId: 'bridgton_maine',
-              },
-            })
-          );
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      socket = ws;
+      socketRef.current = ws;
+      let joinedPlayerId: string | undefined;
+      ws.onopen = () => {
+        const join: RoomCommand = {
+          type: 'join_room',
+          payload: { roomId: roomId.trim(), userName, characterId: selectedCharId, venueId: 'bridgton_maine' },
         };
-
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.event === 'room_joined') {
-              setPlayersList(data.payload.snapshot.players || []);
-              setMySquareId(data.payload.yourSquareId);
-              if (data.payload.snapshot.chatMessages) {
-                setChatMessages(data.payload.snapshot.chatMessages);
-              }
-            } else if (data.event === 'player_joined') {
-              setPlayersList((prev) => [...prev.filter((p) => p.id !== data.payload.player.id), data.payload.player]);
-            } else if (data.event === 'player_left') {
-              setPlayersList((prev) => prev.filter((p) => p.id !== data.payload.userId));
-            } else if (data.event === 'chat_received') {
-              setChatMessages((prev) => [...prev, data.payload]);
-            }
-          } catch (err) {
-            console.error('WS parse error:', err);
-          }
-        };
-
-        ws.onerror = () => setIsConnected(false);
-        ws.onclose = () => setIsConnected(false);
-      } catch (err) {
-        console.warn('Failed to establish WS:', err);
-      }
-    }
+        ws.send(JSON.stringify(join));
+      };
+      ws.onmessage = ({ data }) => {
+        const message = JSON.parse(data) as RoomEvent;
+        switch (message.event) {
+          case 'room_joined':
+            joinedPlayerId = message.payload.playerId;
+            setPlayerId(joinedPlayerId);
+            setPlayersList(message.payload.players);
+            setChatMessages(message.payload.chatMessages);
+            break;
+          case 'room_members':
+            setPlayersList(message.payload);
+            break;
+          case 'room_error':
+            setConnectionError(message.payload);
+            break;
+          case 'chat_received':
+            setChatMessages((previous) => [...previous.slice(-19), message.payload]);
+            break;
+          case 'match_started':
+            if (!joinedPlayerId) return;
+            handedOff = true;
+            socketRef.current = null;
+            startMatchRef.current(ws, joinedPlayerId, message.payload);
+            break;
+        }
+      };
+      ws.onclose = () => {
+        setPlayerId(null);
+        setPlayersList([]);
+        setConnectionError('Connection closed. Reopen Multiplayer to try again.');
+      };
+    }, 250);
 
     return () => {
-      if (socketRef.current) {
-        try {
-          socketRef.current.close();
-        } catch {}
+      cancelled = true;
+      window.clearTimeout(reconnect);
+      if (socket && !handedOff) {
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.close();
         socketRef.current = null;
       }
     };
-  }, [isOpen, activeTab]);
+  }, [isOpen, activeTab, roomId, userName, selectedCharId]);
+
+  useEffect(() => {
+    if (chatLog.current) chatLog.current.scrollTop=chatLog.current.scrollHeight;
+  }, [chatMessages]);
+  useEffect(() => {
+    setCopied(false);
+    setCopyError(false);
+  }, [roomId, isOpen, activeTab]);
 
   if (!isOpen) return null;
 
   const handleSendChat = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !socketRef.current) return;
+    if (!playerId || !chatInput.trim() || socketRef.current?.readyState !== WebSocket.OPEN) return;
 
     try {
       socketRef.current.send(
@@ -139,305 +147,107 @@ export const OnlineMultiplayerModal: React.FC<OnlineMultiplayerModalProps> = ({
     setChatInput('');
   };
 
-  const handleCopyRoomCode = () => {
+  const handleCopyRoomCode = async () => {
     try {
-      if (navigator?.clipboard?.writeText) {
-        navigator.clipboard.writeText(roomId).catch(() => {});
-      }
-    } catch {}
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+      await navigator.clipboard.writeText(roomId.trim());
+      setCopied(true);
+      setCopyError(false);
+    } catch {
+      roomInput.current?.focus();
+      roomInput.current?.select();
+      setCopyError(true);
+    }
   };
 
   const handleLaunchOnline = () => {
-    if (socketRef.current && isConnected) {
-      onStartOnlineMatch({
-        roomId,
-        socket: socketRef.current,
-        mySquareId,
-        myUserId: myUserIdRef.current,
-      });
-      onClose();
+    if (me && !me.ready && socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'ready' } satisfies RoomCommand));
     }
   };
 
   const handleLaunchLocal = () => {
-    if (onStartLocalMatch) {
-      const config = [];
-      for (let i = 0; i < playerCount; i++) {
-        const scheme = controlSchemes[i];
-        const char = CHARACTERS.find((c) => c.id === selectedLocalChars[i]) || CHARACTERS[i];
-        config.push({
-          id: `local-p${i + 1}`,
-          name: `${scheme.name} (${char.name})`,
-          characterId: char.id,
-          controlsLabel: scheme.keys,
-        });
-      }
-      onStartLocalMatch(config);
-      onClose();
-    }
+    if (!onStartLocalMatch) return;
+    onStartLocalMatch(selectedLocalChars.slice(0, playerCount));
+    onClose();
   };
 
+  const localCharacters = selectedLocalChars.slice(0,playerCount);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md select-none animate-in zoom-in-95 duration-200">
-      <div className="bg-slate-900 border-2 border-sky-400 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden text-slate-100 flex flex-col">
-        {/* Header */}
-        <div className="p-5 bg-gradient-to-r from-sky-600 via-blue-600 to-sky-600 text-slate-950 flex items-center justify-between border-b-2 border-sky-700">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-slate-950 text-sky-400 flex items-center justify-center shadow-lg font-black">
-              {activeTab === 'online' ? <Globe className="w-5 h-5" /> : <Gamepad2 className="w-5 h-5 text-emerald-400" />}
-            </div>
-            <div>
-              <span className="text-[10px] font-mono tracking-widest uppercase text-slate-900 font-extrabold">
-                {activeTab === 'online' ? 'CROSS-PLATFORM ONLINE ARENA' : 'SAME-SCREEN 4-SQUARE ARENA'}
-              </span>
-              <h2 className="text-2xl font-black text-slate-950">
-                {activeTab === 'online' ? 'Online Match Lobby' : 'Local Pass & Play Setup'}
-              </h2>
-            </div>
+    <div className="league-overlay" role="dialog" aria-modal="true" aria-label="Multiplayer" onKeyDown={(event)=>{if(event.key==='Escape')onClose();}}>
+      <section className="league-panel multiplayer-lobby">
+        <header className="league-header multiplayer-header">
+          <div><span className="multiplayer-heading-icon">{tournamentRoom?<Hash size={22}/>:<Users size={22}/>}</span>
+            <h2>{tournamentRoom?'Tournament lobby':'Multiplayer'}</h2></div>
+          <button autoFocus className="league-button multiplayer-close" aria-label="Close multiplayer" onClick={onClose}><X size={19}/></button>
+        </header>
+        {!tournamentRoom && onStartLocalMatch && <nav className="multiplayer-tabs" aria-label="Multiplayer modes">
+          <button className="league-button" aria-pressed={activeTab==='online'} onClick={()=>setActiveTab('online')}><Globe size={17}/> Online</button>
+          <button className="league-button" aria-pressed={activeTab==='local'} onClick={()=>setActiveTab('local')}><Gamepad2 size={17}/> Local pass &amp; play</button>
+        </nav>}
+        {activeTab==='online' ? <>
+          <div className="multiplayer-columns">
+            <section className="multiplayer-setup" aria-label="Online setup">
+              <label>Player name
+                <input value={userName} maxLength={32} disabled={Boolean(me?.ready || profileName)} onChange={(event)=>setUserName(event.target.value)}/>
+              </label>
+              <label>Character
+                <select value={selectedCharId} disabled={me?.ready} onChange={(event)=>setSelectedCharId(event.target.value)}>
+                  {CHARACTERS.map(({id,name})=><option key={id} value={id}>{name}</option>)}
+                </select>
+              </label>
+              <label htmlFor="multiplayer-room-code">Room code</label>
+              <div className="multiplayer-inline">
+                <input id="multiplayer-room-code" ref={roomInput} className="multiplayer-code" value={roomId} maxLength={24} readOnly={Boolean(me?.ready || tournamentRoom)}
+                  onChange={(event)=>setRoomId(event.target.value.toUpperCase())}/>
+                <button className="league-button" disabled={!roomId.trim()} onClick={()=>void handleCopyRoomCode()}>{copied?<Check size={15}/>:<Copy size={15}/>} {copied?'Copied':'Copy'}</button>
+              </div>
+              {copyError && <p role="status">Copy the selected room code to share it.</p>}
+            </section>
+            <section className="multiplayer-lineup" aria-label="Court lineup">
+              <header><h3>Court lineup</h3><span>{playersList.length}/4 players</span></header>
+              <ol>{[1,2,3,4].map((square)=>{
+                const player=playersList.find(({squareId})=>squareId===square);
+                const character=CHARACTERS.find(({id})=>id===player?.characterId);
+                return <li key={square} data-you={player?.id===playerId}>
+                  <span className="multiplayer-seat" data-square={square}>{square}</span>
+                  <div><strong>{player?.name ?? 'Open square'}</strong>{player && character && <small>{character.name}</small>}</div>
+                  <span className="multiplayer-player-state">{player ? player.ready?'Ready':player.isHost?'Host':'In lobby' : tournamentRoom?'Pending':'Bot fill'}</span>
+                </li>;
+              })}</ol>
+              {me && <p>Your seat · Square {me.squareId}</p>}
+            </section>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-full bg-slate-950/20 hover:bg-slate-950/40 text-slate-950 transition-colors cursor-pointer"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Tab Selector Bar: ONLINE MATCHMAKING vs LOCAL PASS & PLAY */}
-        <div className="flex border-b border-slate-800 bg-slate-950/90 p-2 gap-2">
-          <button
-            onClick={() => setActiveTab('online')}
-            className={`flex-1 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'online'
-                ? 'bg-sky-500 text-slate-950 shadow-md scale-[1.02]'
-                : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-850'
-            }`}
-          >
-            <Globe className="w-4 h-4" />
-            <span>Online Matchmaking</span>
-            <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-950/40 font-mono">LIVE</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('local')}
-            className={`flex-1 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all cursor-pointer ${
-              activeTab === 'local'
-                ? 'bg-emerald-500 text-slate-950 shadow-md scale-[1.02]'
-                : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-850'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>Local Pass & Play</span>
-            <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-950/40 font-mono">COUCH</span>
-          </button>
-        </div>
-
-        {/* TAB 1: ONLINE MATCHMAKING */}
-        {activeTab === 'online' && (
-          <>
-            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4 border-b border-slate-800">
-              {/* Left: Player Profile & Room Code */}
-              <div className="space-y-3">
-                <div>
-                  <label className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Your Player Tag
-                  </label>
-                  <input
-                    type="text"
-                    value={userName}
-                    onChange={(e) => setUserName(e.target.value)}
-                    className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-400"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Equipped Character
-                  </label>
-                  <select
-                    value={selectedCharId}
-                    onChange={(e) => setSelectedCharId(e.target.value)}
-                    className="w-full mt-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-400 cursor-pointer"
-                  >
-                    {CHARACTERS.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} ({c.archetype})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Room Code with Copy */}
-                <div>
-                  <label className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Court Room Code
-                  </label>
-                  <div className="flex gap-2 mt-1">
-                    <input
-                      type="text"
-                      value={roomId}
-                      onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-                      className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono font-bold text-amber-400 uppercase focus:outline-none focus:border-sky-400"
-                    />
-                    <button
-                      onClick={handleCopyRoomCode}
-                      className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1 text-xs"
-                    >
-                      {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                      <span>{copied ? 'Copied' : 'Share'}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Right: Connected Players List */}
-              <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between text-xs font-mono font-bold text-slate-300 pb-2 border-b border-slate-800">
-                    <span>PLAYERS IN ROOM ({playersList.length}/4)</span>
-                    <span className="flex items-center gap-1.5 text-emerald-400">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                      ONLINE
-                    </span>
-                  </div>
-
-                  <div className="space-y-1.5 mt-2">
-                    {[1, 2, 3, 4].map((sqNum) => {
-                      const p = playersList.find((item) => item.squareId === sqNum);
-                      return (
-                        <div
-                          key={sqNum}
-                          className="flex items-center justify-between p-2 rounded-xl bg-slate-900/90 border border-slate-800/80 text-xs"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="w-5 h-5 rounded-md bg-slate-800 flex items-center justify-center font-mono font-bold text-[10px] text-amber-400">
-                              {sqNum}
-                            </span>
-                            <span className="font-bold text-white">
-                              {p ? p.name : 'Waiting for player...'}
-                            </span>
-                          </div>
-                          <span className="text-[10px] font-mono text-slate-400">
-                            {p ? (p.isHost ? '👑 Host' : 'Ready') : 'AI Bot'}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800/60 mt-2">
-                  Your Slot: <strong className="text-amber-400">{mySquareId ? `Square ${mySquareId}` : 'Queue'}</strong>
-                </div>
-              </div>
-            </div>
-
-            {/* Live Room Chat & Launch Action */}
-            <div className="p-4 bg-slate-950 flex flex-col sm:flex-row items-center justify-between gap-3">
-              <form onSubmit={handleSendChat} className="flex-1 flex gap-2 w-full">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Chat with room..."
-                  className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-400"
-                />
-                <button
-                  type="submit"
-                  className="p-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 transition-colors cursor-pointer"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
-
-              <button
-                onClick={handleLaunchOnline}
-                className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-400 to-blue-500 hover:from-sky-300 hover:to-blue-400 text-slate-950 font-black text-sm uppercase tracking-wider shadow-lg shadow-sky-500/20 cursor-pointer transition-all active:scale-95 shrink-0"
-              >
-                <Play className="w-4 h-4 fill-slate-950" />
-                <span>Enter Court Arena</span>
-              </button>
-            </div>
-          </>
-        )}
-
-        {/* TAB 2: LOCAL PASS & PLAY */}
-        {activeTab === 'local' && (
-          <div className="p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-300">
-                Select Number of Players
-              </span>
-              <div className="flex gap-2">
-                {[2, 3, 4].map((count) => (
-                  <button
-                    key={count}
-                    onClick={() => setPlayerCount(count as 2 | 3 | 4)}
-                    className={`px-4 py-1.5 rounded-xl font-black text-xs transition-all cursor-pointer ${
-                      playerCount === count
-                        ? 'bg-emerald-400 text-slate-950 shadow-md scale-105'
-                        : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
-                    }`}
-                  >
-                    {count} Players
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Player roster cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[46vh] overflow-y-auto pr-1">
-              {controlSchemes.slice(0, playerCount).map((ctrl, i) => (
-                <div
-                  key={ctrl.p}
-                  className="p-3 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2"
-                >
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-black ${ctrl.color}`}>{ctrl.name}</span>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-bold">
-                      {ctrl.square}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    Controls: <strong className="text-slate-200">{ctrl.keys}</strong>
-                  </div>
-
-                  <select
-                    value={selectedLocalChars[i]}
-                    onChange={(e) => {
-                      const next = [...selectedLocalChars];
-                      next[i] = e.target.value;
-                      setSelectedLocalChars(next);
-                    }}
-                    className="w-full bg-slate-900 border border-slate-700 text-xs text-white rounded-lg p-1.5 focus:outline-none focus:border-emerald-400 cursor-pointer"
-                  >
-                    {CHARACTERS.map((char) => (
-                      <option key={char.id} value={char.id}>
-                        {char.name} ({char.nickname})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-
-            {/* Footer action */}
-            <div className="pt-3 border-t border-slate-800 flex items-center justify-between">
-              <div className="text-xs text-slate-400 hidden sm:block">
-                Same-device couch multiplayer with separate keyboard mappings!
-              </div>
-              <button
-                onClick={handleLaunchLocal}
-                className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm uppercase tracking-wider shadow-lg shadow-emerald-500/20 cursor-pointer transition-all active:scale-95 ml-auto"
-              >
-                <Play className="w-4 h-4 fill-slate-950" />
-                <span>Launch Local Match</span>
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+          <section className="multiplayer-chat" aria-label="Room chat">
+            {chatMessages.length > 0 && <div className="multiplayer-chat-log" role="log" aria-label="Room messages" ref={chatLog}>{chatMessages.map(({id,sender,text})=><p key={id}><strong>{sender}</strong> {text}</p>)}</div>}
+            <form className="multiplayer-inline" onSubmit={handleSendChat}>
+              <input aria-label="Room message" value={chatInput} disabled={!playerId} maxLength={240} placeholder="Message the room" onChange={(event)=>setChatInput(event.target.value)}/>
+              <button type="submit" className="league-button" aria-label="Send message" disabled={!playerId || !chatInput.trim()}><Send size={17}/></button>
+            </form>
+          </section>
+          <footer className="league-footer multiplayer-footer">
+            <p role="status">{connectionError || (me?.ready ? 'Waiting for the other players to ready up.' :
+              !roomId.trim() ? 'Enter a room code.' : !me ? 'Connecting to the room…' :
+              playersList.length < (tournamentRoom ? 4 : 2) ? tournamentRoom?'The match requires all four entrants.':'Share the room code to invite a player.' : 'The match starts when everyone is ready.')}</p>
+            <button className="league-primary" disabled={!me || me.ready || playersList.length<(tournamentRoom?4:2)} onClick={handleLaunchOnline}><Play size={16}/> {me?.ready?'Ready':'Ready up'}</button>
+          </footer>
+        </> : <>
+          <section className="multiplayer-local" aria-label="Local setup">
+            <div className="multiplayer-local-count"><h3>Players</h3><div>{([2,3,4] as const).map((count)=><button className="league-button" key={count} aria-pressed={playerCount===count} onClick={()=>setPlayerCount(count)}>{count}</button>)}</div></div>
+            <div className="multiplayer-local-seats">{LOCAL_SEATS.slice(0,playerCount).map((seat,index)=><article key={seat.id}>
+              <header><span className="multiplayer-seat" data-square={seat.startSquare}>{seat.startSquare}</span><strong>{seat.name}</strong></header>
+              <label>{seat.name} character<select value={localCharacters[index]} onChange={(event)=>{
+                const next=event.target.value;
+                setSelectedLocalChars((previous)=>previous.map((id,position)=>position===index?next:id===next?previous[index]:id));
+              }}>{CHARACTERS.map(({id,name})=><option key={id} value={id}>{name}</option>)}</select></label>
+              <p>{seat.keysLabel} aim · {seat.quickLabel} quick shot</p>
+            </article>)}</div>
+          </section>
+          <footer className="league-footer multiplayer-footer"><p>{playerCount<4 ? (4-playerCount)+' open '+(playerCount===3?'square fills':'squares fill')+' with bots.' : 'All four squares have local players.'}</p>
+            <button className="league-primary" onClick={handleLaunchLocal}><Play size={16}/> Start match</button>
+          </footer>
+        </>}
+      </section>
     </div>
   );
 };

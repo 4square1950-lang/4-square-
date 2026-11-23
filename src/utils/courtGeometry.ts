@@ -18,7 +18,7 @@ export const SQUARE_CONFIGS: Record<SquareId, SquareInfo> = {
   1: {
     id: 1,
     name: 'Square 1',
-    role: 'Jack (Serve Box)',
+    role: 'King (Serve Box)',
     colorHex: '#2563EB', // Bright Royal Blue
     lightColorHex: '#60A5FA',
     center: [-2.5, 2.5],
@@ -39,17 +39,17 @@ export const SQUARE_CONFIGS: Record<SquareId, SquareInfo> = {
     role: 'Challenger',
     colorHex: '#F59E0B', // Golden Orange
     lightColorHex: '#FDE68A',
-    center: [2.5, -2.5],
-    defaultPlayerPos: [2.6, 0, -2.6],
+    center: [2.5, 2.5],
+    defaultPlayerPos: [2.6, 0, 2.6],
   },
   4: {
     id: 4,
     name: 'Square 4',
-    role: 'King (Receiver)',
+    role: 'Rookie (Receiver)',
     colorHex: '#DC2626', // Crimson Red
     lightColorHex: '#F87171',
-    center: [2.5, 2.5],
-    defaultPlayerPos: [2.6, 0, 2.6],
+    center: [2.5, -2.5],
+    defaultPlayerPos: [2.6, 0, -2.6],
   },
 };
 
@@ -70,7 +70,8 @@ export function evaluateBallLanding(x: number, z: number, ruleSet: RuleSet): Lan
   const absZ = Math.abs(z);
 
   // Outside bounds check
-  const maxBound = COURT_HALF_SIZE + (ruleSet === 'league' ? OUTSIDE_LINE_THICKNESS : 0);
+  const lineReach = OUTSIDE_LINE_THICKNESS * 0.8;
+  const maxBound = COURT_HALF_SIZE + lineReach;
   if (absX > maxBound || absZ > maxBound) {
     return {
       square: null,
@@ -81,13 +82,22 @@ export function evaluateBallLanding(x: number, z: number, ruleSet: RuleSet): Lan
     };
   }
 
-  // Outside line check
+  // Give the dividing lines priority where they meet the perimeter.
+  if (absX <= LINE_HALF_WIDTH || absZ <= LINE_HALF_WIDTH) {
+    return {
+      square: null,
+      isInsideLine: true,
+      isOutsideLine: false,
+      isOutOfBounds: true,
+      description: 'Touched inside dividing line — OUT! (Inside lines are out)',
+    };
+  }
+
   const touchingOutsideLine =
-    Math.abs(absX - COURT_HALF_SIZE) <= OUTSIDE_LINE_THICKNESS * 0.8 ||
-    Math.abs(absZ - COURT_HALF_SIZE) <= OUTSIDE_LINE_THICKNESS * 0.8;
+    absX >= COURT_HALF_SIZE - lineReach || absZ >= COURT_HALF_SIZE - lineReach;
 
   if (touchingOutsideLine) {
-    if (ruleSet === 'league') {
+    if (ruleSet !== 'school') {
       // In league rules: outside lines are IN!
       // Assign to closest quadrant
       const sq = getQuadrantSquare(x, z);
@@ -110,18 +120,6 @@ export function evaluateBallLanding(x: number, z: number, ruleSet: RuleSet): Lan
     }
   }
 
-  // Inside dividing cross line check
-  const touchingInsideLine = absX <= LINE_HALF_WIDTH || absZ <= LINE_HALF_WIDTH;
-  if (touchingInsideLine) {
-    return {
-      square: null,
-      isInsideLine: true,
-      isOutsideLine: false,
-      isOutOfBounds: true,
-      description: 'Touched inside dividing line — OUT! (Inside lines are out)',
-    };
-  }
-
   // Inside a square cleanly
   const sq = getQuadrantSquare(x, z);
   return {
@@ -136,8 +134,8 @@ export function evaluateBallLanding(x: number, z: number, ruleSet: RuleSet): Lan
 export function getQuadrantSquare(x: number, z: number): SquareId {
   if (x < 0 && z >= 0) return 1;
   if (x < 0 && z < 0) return 2;
-  if (x >= 0 && z < 0) return 3;
-  return 4;
+  if (x >= 0 && z < 0) return 4;
+  return 3;
 }
 
 export interface InitialCharacter {

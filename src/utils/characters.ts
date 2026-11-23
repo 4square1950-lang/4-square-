@@ -73,7 +73,7 @@ const RAW_CHARACTERS: RawCharacterDef[] = [
     isFree: true,
     avatarColor: '#2563EB',
     capColor: '#EF4444',
-    skinColor: '#FBBF24',
+    skinColor: '#CF9C72',
     quote: "Humans don't back down. Let's keep the rally rolling!",
     archetype: 'patch',
     kingCourtHolds: 142,
@@ -769,15 +769,17 @@ export interface CharacterCustomization {
   accessoryColor?: string;
   creatureArchetype?: CreatureArchetype | string;
   shirtPattern?: string;
+  shirtLogo?: string;
   shirtSecondaryColor?: string;
   jerseyNumber?: string | number;
+  jerseyName?: string;
   shoesColor?: string;
   hairColor?: string;
   hairStyle?: string;
 }
 
 export const DEFAULT_CUSTOMIZATION: CharacterCustomization = {
-  skinColor: '#FBBF24',
+  skinColor: '#CF9C72',
   shirtColor: '#2563EB',
   pantsColor: '#1E293B',
   shoeColor: '#FFFFFF',

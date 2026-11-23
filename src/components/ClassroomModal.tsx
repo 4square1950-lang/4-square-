@@ -1,29 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import confetti from 'canvas-confetti';
-import {
-  X,
-  GraduationCap,
-  BookOpen,
-  Sparkles,
-  Trophy,
-  Users,
-  Award,
-  Zap,
-  Check,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Coins,
-  Play,
-  Volume2,
-  ChevronRight,
-  MessageCircle,
-} from 'lucide-react';
 import { soundFX } from '../services/soundEffects';
 import { CHARACTERS, CharacterDef } from '../utils/characters';
-import { buildSeatedStudent, buildTeacherInstructor } from '../utils/characterModelBuilder';
-import { FourSquareCoin } from './FourSquareCoin';
+import { buildSeatedStudent } from '../utils/characterModelBuilder';
+import { animateCampusTeacher, buildCampusTeacher } from '../utils/campusRooms';
 
 export interface QuizQuestion {
   id: string;
@@ -47,8 +28,9 @@ export interface LessonQuiz {
 interface ClassroomModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onStartMatchWithClassmate?: (classmate?: CharacterDef) => void;
   onRewardCoins?: (amount: number) => void;
+  passedLessons?:string[];
+  onPassLesson?:(id:string,coins:number)=>void;
 }
 
 const LESSON_QUIZZES: LessonQuiz[] = [
@@ -229,11 +211,18 @@ const LESSON_QUIZZES: LessonQuiz[] = [
   },
 ];
 
+const ASSESSMENTS:LessonQuiz[] = [...LESSON_QUIZZES,{
+  ...LESSON_QUIZZES[0], id:'court-exam', subject:'School Circuit assessment', title:'Four Square practical test',
+  description:'Apply serving, receiving, line calls, and court science.', rewardCoins:100,
+  questions:LESSON_QUIZZES.flatMap(({questions})=>questions.slice(0,1)),
+}];
+
 export const ClassroomModal: React.FC<ClassroomModalProps> = ({
   isOpen,
   onClose,
-  onStartMatchWithClassmate,
   onRewardCoins,
+  passedLessons,
+  onPassLesson,
 }) => {
   const [activeTab, setActiveTab] = useState<'classroom' | 'lessons' | 'classmates'>('classroom');
   const [completedLessons, setCompletedLessons] = useState<string[]>([]);
@@ -245,6 +234,9 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
   const [isAnswerSubmitted, setIsAnswerSubmitted] = useState(false);
   const [correctAnswersCount, setCorrectAnswersCount] = useState(0);
   const [quizFinished, setQuizFinished] = useState(false);
+  const workbookOpen=useRef(false);
+  workbookOpen.current=Boolean(activeQuiz && !quizFinished);
+  useEffect(()=>{if(passedLessons)setCompletedLessons(passedLessons);},[passedLessons]);
 
   // Selected Classmate Dialogue State
   const [inspectedClassmate, setInspectedClassmate] = useState<CharacterDef | null>(null);
@@ -376,7 +368,7 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
     }
     const boardTex = new THREE.CanvasTexture(boardCanvas);
     const board = new THREE.Mesh(
-      new THREE.BoxGeometry(8.5, 3.2, 0.1),
+      new THREE.BoxGeometry(10.3, 3.55, 0.1),
       new THREE.MeshStandardMaterial({ map: boardTex, roughness: 0.35 })
     );
     board.position.set(0, 3.0, -5.4);
@@ -397,7 +389,7 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
     room.add(redBall);
 
     // 1. TEACHER INSTRUCTOR (Coach Leo) Standing at Chalkboard Teaching
-    const teacher = buildTeacherInstructor('Coach Leo', 'Four Square Head Instructor');
+    const teacher = buildCampusTeacher();
     teacher.position.set(1.4, 0, -4.2);
     teacher.rotation.y = 0.2;
     room.add(teacher);
@@ -412,11 +404,12 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
       { col: 1, row: 1, x: 2.4, z: 2.2, charIdx: 5 },
     ];
 
-    deskPositions.forEach((dp) => {
+    const desks = deskPositions.map((dp) => {
       const studentChar = classroomStudents[dp.charIdx % classroomStudents.length];
       const studentDesk = buildSeatedStudent(studentChar, { deskWidth: 1.4, deskDepth: 0.8 });
       studentDesk.position.set(dp.x, 0, dp.z);
       room.add(studentDesk);
+      return studentDesk;
     });
 
     scene.add(room);
@@ -429,10 +422,19 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
       animId = requestAnimationFrame(animate);
       const elapsed = clock.getElapsedTime();
 
-      // Gentle camera sway or breathing
-      if (classroomGroupRef.current) {
-        classroomGroupRef.current.position.y = Math.sin(elapsed * 1.5) * 0.01;
-      }
+      desks.forEach((desk,index)=>{
+        const writing=desk.getObjectByName('writingHand');
+        if (writing) {
+          writing.position.x=.18+Math.sin(elapsed*3+index)*.08;
+          writing.position.z=.11+Math.cos(elapsed*2.8+index)*.04;
+          writing.rotation.z=Math.sin(elapsed*2+index)*.11;
+        }
+      });
+      animateCampusTeacher(teacher, elapsed);
+      teacher.rotation.y=.2+Math.sin(elapsed*1.2)*.23;
+      camera.position.lerp(workbookOpen.current ? new THREE.Vector3(.95,2.12,2.56) : new THREE.Vector3(0,3.2,7.2),.06);
+      if(workbookOpen.current) camera.lookAt(0,.75,2.2);
+      else camera.lookAt(0,1.6,-2);
 
       renderer.render(scene, camera);
     };
@@ -477,9 +479,10 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
           const char = (cur as any).userData.character as CharacterDef;
           soundFX.playClick();
           setInspectedClassmate(char);
+          setActiveTab('classmates');
           return;
         }
-        if ((cur as any).userData?.isTeacher) {
+        if (cur.userData.isTeacher) {
           soundFX.playWhistle();
           setActiveTab('lessons');
           return;
@@ -504,7 +507,7 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
 
   // Submit Answer to Active Question
   const handleSubmitAnswer = () => {
-    if (selectedOption === null || !activeQuiz) return;
+    if (selectedOption === null || !activeQuiz || isAnswerSubmitted) return;
     setIsAnswerSubmitted(true);
 
     const question = activeQuiz.questions[currentQuestionIdx];
@@ -529,11 +532,10 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
     } else {
       // Quiz Finished!
       setQuizFinished(true);
-      const isPassed = correctAnswersCount + (selectedOption === activeQuiz.questions[currentQuestionIdx].correctIndex ? 1 : 0) >= Math.ceil(activeQuiz.questions.length / 2);
+      const isPassed = correctAnswersCount >= Math.ceil(activeQuiz.questions.length * (activeQuiz.id==='court-exam' ? .75 : .5));
       
       if (isPassed) {
         soundFX.playSchoolPAChime();
-        soundFX.speakAnnouncer(`Classroom quiz passed! ${activeQuiz.statBonus} unlocked!`);
         confetti({
           particleCount: 50,
           spread: 60,
@@ -542,7 +544,8 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
 
         if (!completedLessons.includes(activeQuiz.id)) {
           setCompletedLessons((prev) => [...prev, activeQuiz.id]);
-          if (onRewardCoins) {
+          if (onPassLesson) onPassLesson(activeQuiz.id,activeQuiz.rewardCoins);
+          else if (onRewardCoins) {
             onRewardCoins(activeQuiz.rewardCoins);
           }
         }
@@ -550,500 +553,64 @@ export const ClassroomModal: React.FC<ClassroomModalProps> = ({
     }
   };
 
+  const question = activeQuiz?.questions[currentQuestionIdx];
+  const passed = activeQuiz && correctAnswersCount >= Math.ceil(activeQuiz.questions.length * (activeQuiz.id === 'court-exam' ? .75 : .5));
+  const showLessons = () => { setActiveQuiz(null); setActiveTab('lessons'); };
+
   return (
-    <div className="fixed inset-0 z-50 w-screen h-screen bg-slate-950 flex flex-col select-none font-sans text-slate-100 overflow-hidden animate-in fade-in duration-200">
-      {/* Top Header Bar */}
-      <div className="h-16 px-6 bg-slate-900 border-b border-amber-500/30 flex items-center justify-between shrink-0 shadow-xl z-30">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-amber-400 text-slate-950 flex items-center justify-center font-black shadow-lg">
-            <GraduationCap className="w-5 h-5" />
-          </div>
-          <div>
-            <span className="text-[10px] font-mono tracking-widest uppercase text-amber-400 font-black">
-              OAKRIDGE ELEMENTARY • FOUR SQUARE ACADEMY
-            </span>
-            <h1 className="text-lg sm:text-xl font-black text-white tracking-wide">
-              ROOM 104 • THEORY & SCHOOLYARD LIFE
-            </h1>
-          </div>
-        </div>
-
-        {/* Tab Switcher */}
-        <div className="flex items-center gap-2 bg-slate-950 p-1 rounded-2xl border border-slate-800">
-          <button
-            onClick={() => {
-              soundFX.playClick();
-              setActiveTab('classroom');
-              setActiveQuiz(null);
-            }}
-            className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-              activeTab === 'classroom' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            3D Classroom
-          </button>
-          <button
-            onClick={() => {
-              soundFX.playClick();
-              setActiveTab('lessons');
-            }}
-            className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-              activeTab === 'lessons' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            <span>Optional Quizzes ({completedLessons.length}/{LESSON_QUIZZES.length})</span>
-          </button>
-          <button
-            onClick={() => {
-              soundFX.playClick();
-              setActiveTab('classmates');
-              setActiveQuiz(null);
-            }}
-            className={`px-4 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-              activeTab === 'classmates' ? 'bg-amber-400 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>Classmates ({classroomStudents.length})</span>
-          </button>
-        </div>
-
-        <button
-          onClick={() => {
-            soundFX.playClick();
-            onClose();
-          }}
-          className="flex items-center gap-2 px-4 py-2 rounded-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs uppercase tracking-wider transition-all cursor-pointer hover:scale-105 active:scale-95 shadow-lg"
-        >
-          <X className="w-4 h-4" />
-          <span>Exit School</span>
-        </button>
-      </div>
-
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col md:flex-row h-[calc(100vh-4rem)] overflow-hidden">
-        {/* LEFT / 3D CLASSROOM VIEWPORT (60% width) */}
-        <div className="w-full md:w-3/5 h-1/2 md:h-full relative bg-slate-950 border-b md:border-b-0 md:border-r border-slate-800 flex flex-col">
-          <div
-            ref={containerRef}
-            onClick={handleCanvasClick}
-            className="w-full h-full cursor-pointer touch-none z-10"
-          />
-
-          <div className="absolute top-4 left-4 z-20 pointer-events-none">
-            <div className="px-3.5 py-1.5 rounded-xl bg-slate-900/90 border border-amber-400/40 flex items-center gap-2 shadow-lg">
-              <span className="text-xs font-black text-white uppercase tracking-wider">
-                💡 CLICK ON ANY STUDENT AT THEIR DESK OR TEACHER TO TALK & CHALLENGE!
-              </span>
-            </div>
-          </div>
-
-          <div className="absolute bottom-4 left-4 right-4 z-20 pointer-events-none flex items-center justify-between">
-            <div className="px-3 py-1.5 rounded-xl bg-slate-900/80 border border-slate-700 text-[11px] text-slate-300">
-              Teacher: <strong>Coach Leo</strong> • Blackboard: <strong>45° Vector Cut</strong>
-            </div>
-            <div className="px-3 py-1.5 rounded-xl bg-slate-900/80 border border-slate-700 text-[11px] text-amber-300 flex items-center gap-1.5">
-              <Coins className="w-3.5 h-3.5" />
-              <span>Pass optional quizzes to earn +50 Coins & Court Perks</span>
-            </div>
+    <div className="fixed inset-0 z-50 flex justify-center bg-black/70 p-2 sm:p-6" role="dialog" aria-modal="true" aria-label="Classroom">
+      <section className="league-panel flex h-full w-full max-w-6xl flex-col overflow-hidden">
+        <header className="league-header flex-wrap gap-3">
+          <h2>Classroom</h2>
+          <nav aria-label="Classroom sections" className="flex flex-wrap gap-2">
+            <button className="league-button" aria-pressed={activeTab === 'classroom'} onClick={() => { setActiveQuiz(null); setActiveTab('classroom'); }}>Room</button>
+            <button className="league-button" aria-pressed={activeTab === 'lessons'} onClick={showLessons}>Quizzes &amp; tests</button>
+            <button className="league-button" aria-pressed={activeTab === 'classmates'} onClick={() => { setActiveQuiz(null); setActiveTab('classmates'); }}>Classmates</button>
+          </nav>
+          <button className="league-button" onClick={onClose}>Back</button>
+        </header>
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(9rem,38%)_1fr] md:grid-cols-[1.25fr_1fr] md:grid-rows-1">
+          <div className="min-h-0 cursor-pointer bg-[#282f2a]" ref={containerRef} onClick={handleCanvasClick} />
+          <div className="min-h-0 overflow-y-auto p-4 sm:p-6">
+            {activeTab === 'classroom' && <div className="grid gap-4">
+              <h3 className="text-xl font-semibold">Court tactics</h3>
+              <button className="league-primary justify-self-start" onClick={showLessons}>Open workbook</button>
+            </div>}
+            {activeTab === 'lessons' && !activeQuiz && <div className="grid gap-3">
+              <h3 className="text-lg font-semibold">Workbook</h3>
+              {LESSON_QUIZZES.map((quiz) => <button key={quiz.id} className="league-button flex justify-between gap-3 text-left" onClick={() => handleStartQuiz(quiz)}>
+                <span>{quiz.title}</span><span>{completedLessons.includes(quiz.id) ? 'Passed' : quiz.id === 'court-exam' ? 'Test' : 'Quiz'}</span>
+              </button>)}
+            </div>}
+            {activeTab === 'lessons' && activeQuiz && question && <div key={question.id} className="grid gap-4">
+              <button className="league-button justify-self-start" onClick={showLessons}>All lessons</button>
+              <h3 className="text-lg font-semibold">{activeQuiz.title}</h3>
+              {quizFinished ? <div role="status">
+                <strong>{passed ? 'Passed' : 'Try again'}</strong>
+                <p>{correctAnswersCount} of {activeQuiz.questions.length} correct</p>
+                {!passed && <button className="league-primary mt-3" onClick={() => handleStartQuiz(activeQuiz)}>Retake</button>}
+              </div> : <>
+                <progress className="w-full accent-amber-200" max={activeQuiz.questions.length} value={currentQuestionIdx + 1} aria-label="Workbook progress" />
+                <p className="text-sm text-stone-300">Question {currentQuestionIdx + 1} of {activeQuiz.questions.length}</p>
+                <p>{question.question}</p>
+                {question.options.map((option, index) => <button key={option} disabled={isAnswerSubmitted} aria-pressed={selectedOption === index} className="league-button text-left disabled:opacity-70" onClick={() => setSelectedOption(index)}>{option}</button>)}
+                {isAnswerSubmitted ? <>
+                  <div role="status" className="rounded-lg border border-white/15 p-3">
+                    <strong>{selectedOption === question.correctIndex ? 'Correct' : 'Incorrect'}</strong>
+                    <p>{question.explanation}</p>
+                  </div>
+                  <button className="league-primary" onClick={handleNextQuestion}>{currentQuestionIdx + 1 === activeQuiz.questions.length ? 'See results' : 'Next question'}</button>
+                </> : <button className="league-primary" disabled={selectedOption === null} onClick={handleSubmitAnswer}>Check answer</button>}
+              </>}
+            </div>}
+            {activeTab === 'classmates' && <div className="grid gap-3">
+              <h3 className="text-lg font-semibold">Classmates</h3>
+              {classroomStudents.map((student) => <button className="league-button text-left" key={student.id} aria-pressed={inspectedClassmate?.id === student.id} onClick={() => setInspectedClassmate(student)}>{student.name}</button>)}
+              {inspectedClassmate && <p className="border-t border-white/15 pt-3">{inspectedClassmate.quote}</p>}
+            </div>}
           </div>
         </div>
-
-        {/* RIGHT SIDE PANEL: Lessons, Quizzes, Classmates or Character Dialogue */}
-        <div className="w-full md:w-2/5 h-1/2 md:h-full bg-slate-950 p-6 overflow-y-auto flex flex-col">
-          {/* Active Quiz View */}
-          {activeQuiz ? (
-            <div className="flex-1 flex flex-col justify-between space-y-4">
-              <div>
-                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                  <div>
-                    <span className="text-[10px] font-mono font-bold text-amber-400 uppercase tracking-widest">
-                      {activeQuiz.subject}
-                    </span>
-                    <h2 className="text-lg font-black text-white">{activeQuiz.title}</h2>
-                  </div>
-                  <button
-                    onClick={() => setActiveQuiz(null)}
-                    className="text-xs font-bold text-slate-400 hover:text-white px-2 py-1 rounded-lg bg-slate-900"
-                  >
-                    Back to Quizzes
-                  </button>
-                </div>
-
-                {!quizFinished ? (
-                  <div className="space-y-4 mt-4">
-                    <div className="flex items-center justify-between text-xs font-mono text-slate-400">
-                      <span>Question {currentQuestionIdx + 1} of {activeQuiz.questions.length}</span>
-                      <span className="text-amber-400 font-bold">Reward: +{activeQuiz.rewardCoins} Coins</span>
-                    </div>
-
-                    {/* Question Card */}
-                    <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
-                      <p className="text-sm sm:text-base font-bold text-white leading-relaxed">
-                        {activeQuiz.questions[currentQuestionIdx].question}
-                      </p>
-
-                      {/* Options */}
-                      <div className="space-y-2 pt-2">
-                        {activeQuiz.questions[currentQuestionIdx].options.map((opt, oIdx) => {
-                          const isSelected = selectedOption === oIdx;
-                          const isCorrect = oIdx === activeQuiz.questions[currentQuestionIdx].correctIndex;
-                          let btnStyle = 'bg-slate-950 border-slate-800 text-slate-200 hover:border-amber-400';
-
-                          if (isAnswerSubmitted) {
-                            if (isCorrect) {
-                              btnStyle = 'bg-emerald-950/60 border-emerald-500 text-emerald-200 font-black';
-                            } else if (isSelected) {
-                              btnStyle = 'bg-rose-950/60 border-rose-500 text-rose-200';
-                            } else {
-                              btnStyle = 'bg-slate-950 border-slate-900 text-slate-500 opacity-60';
-                            }
-                          } else if (isSelected) {
-                            btnStyle = 'bg-amber-500/20 border-amber-400 text-white font-black shadow-md';
-                          }
-
-                          return (
-                            <button
-                              key={oIdx}
-                              disabled={isAnswerSubmitted}
-                              onClick={() => {
-                                soundFX.playClick();
-                                setSelectedOption(oIdx);
-                              }}
-                              className={`w-full p-3 rounded-xl border text-left text-xs sm:text-sm transition-all cursor-pointer flex items-center justify-between ${btnStyle}`}
-                            >
-                              <span>{opt}</span>
-                              {isAnswerSubmitted && isCorrect && (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                              )}
-                              {isAnswerSubmitted && isSelected && !isCorrect && (
-                                <XCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      {/* Referee Explanation on submit */}
-                      {isAnswerSubmitted && (
-                        <div className="mt-3 p-3 rounded-xl bg-slate-950 border border-amber-400/30 text-xs text-amber-200 space-y-1 animate-in fade-in">
-                          <div className="font-bold flex items-center gap-1.5 text-amber-400">
-                            <Sparkles className="w-3.5 h-3.5" />
-                            <span>Referee Rulebook Citation:</span>
-                          </div>
-                          <p className="leading-relaxed">
-                            {activeQuiz.questions[currentQuestionIdx].explanation}
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  /* Quiz Results Screen */
-                  <div className="space-y-4 mt-6 text-center">
-                    <div className="w-16 h-16 rounded-3xl bg-amber-400/20 border border-amber-400 text-amber-400 flex items-center justify-center mx-auto shadow-lg">
-                      <Trophy className="w-8 h-8" />
-                    </div>
-
-                    <div>
-                      <h3 className="text-xl font-black text-white">Quiz Completed!</h3>
-                      <p className="text-xs text-slate-400 mt-1">
-                        You scored {correctAnswersCount} / {activeQuiz.questions.length} correct.
-                      </p>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
-                      <div className="text-xs text-amber-400 font-bold">Reward Unlocked:</div>
-                      <div className="text-sm font-black text-white">{activeQuiz.statBonus}</div>
-                      <div className="flex items-center justify-center gap-1.5 text-xs text-amber-300 font-mono">
-                        <Coins className="w-4 h-4" />
-                        <span>+{activeQuiz.rewardCoins} Four Square Coins</span>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => setActiveQuiz(null)}
-                      className="w-full py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg"
-                    >
-                      Return to Lesson Curriculum
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {!quizFinished && (
-                <div className="pt-4 border-t border-slate-800">
-                  {!isAnswerSubmitted ? (
-                    <button
-                      disabled={selectedOption === null}
-                      onClick={handleSubmitAnswer}
-                      className={`w-full py-3 rounded-xl font-black text-xs uppercase tracking-wider transition-all cursor-pointer shadow-lg ${
-                        selectedOption !== null
-                          ? 'bg-amber-400 hover:bg-amber-300 text-slate-950'
-                          : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                      }`}
-                    >
-                      Submit Answer
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleNextQuestion}
-                      className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg flex items-center justify-center gap-2"
-                    >
-                      <span>
-                        {currentQuestionIdx < activeQuiz.questions.length - 1
-                          ? 'Next Question'
-                          : 'View Quiz Results'}
-                      </span>
-                      <ChevronRight className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : inspectedClassmate ? (
-            /* Student Dialogue & Challenge Card */
-            <div className="flex-1 flex flex-col justify-between space-y-4 my-auto">
-              <div className="space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-12 h-12 rounded-2xl flex items-center justify-center font-black text-white text-lg shadow-md"
-                      style={{ backgroundColor: inspectedClassmate.avatarColor }}
-                    >
-                      {inspectedClassmate.name[0]}
-                    </div>
-                    <div>
-                      <h3 className="font-black text-base text-white">{inspectedClassmate.name}</h3>
-                      <div className="text-xs text-amber-400 font-bold">{inspectedClassmate.nickname}</div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setInspectedClassmate(null)}
-                    className="p-1 rounded-full bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Quote Bubble */}
-                <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-sm italic text-slate-200">
-                  "{inspectedClassmate.quote}"
-                </div>
-
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase font-mono">Corner Cut</span>
-                    <div className="text-sm font-black text-amber-400">{inspectedClassmate.cornerCutAccuracy}%</div>
-                  </div>
-                  <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase font-mono">Smash Speed</span>
-                    <div className="text-sm font-black text-cyan-400">{inspectedClassmate.smashVelocityMph} MPH</div>
-                  </div>
-                  <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase font-mono">Spin Control</span>
-                    <div className="text-sm font-black text-emerald-400">{inspectedClassmate.spinControlRpm} RPM</div>
-                  </div>
-                  <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
-                    <span className="text-[10px] text-slate-400 uppercase font-mono">Fault Recovery</span>
-                    <div className="text-sm font-black text-rose-400">{inspectedClassmate.faultRecoveryRate}%</div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2 pt-4 border-t border-slate-800">
-                <button
-                  onClick={() => {
-                    soundFX.playClick();
-                    if (onStartMatchWithClassmate) {
-                      onStartMatchWithClassmate(inspectedClassmate);
-                    }
-                    onClose();
-                  }}
-                  className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg flex items-center justify-center gap-2"
-                >
-                  <Trophy className="w-4 h-4" />
-                  <span>Challenge {inspectedClassmate.name} to Match!</span>
-                </button>
-                <button
-                  onClick={() => setInspectedClassmate(null)}
-                  className="w-full py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white text-xs font-bold cursor-pointer"
-                >
-                  Close Dialogue
-                </button>
-              </div>
-            </div>
-          ) : activeTab === 'classroom' ? (
-            /* Tab 1: 3D Classroom Overview */
-            <div className="space-y-6 my-auto">
-              <div className="space-y-2">
-                <span className="text-xs font-mono font-black text-amber-400 uppercase tracking-widest">
-                  OAKRIDGE FOUR SQUARE ACADEMY
-                </span>
-                <h2 className="text-2xl font-black text-white tracking-tight">
-                  Welcome to Theory Class
-                </h2>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Students study court trigonometry, spin physics, and official USFA rules here before hitting the asphalt. Click any student at their desk to trade tips or invite them directly to a Four Square match!
-                </p>
-              </div>
-
-              <div className="space-y-3">
-                <button
-                  onClick={() => setActiveTab('lessons')}
-                  className="w-full p-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-amber-400 text-left transition-all cursor-pointer flex items-center gap-4 group"
-                >
-                  <div className="w-12 h-12 rounded-2xl bg-amber-400/20 text-amber-400 flex items-center justify-center font-black shrink-0 border border-amber-400/30">
-                    <BookOpen className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-black text-white group-hover:text-amber-300 transition-colors">
-                      Attend Optional Four Square Quizzes
-                    </div>
-                    <div className="text-xs text-slate-400">
-                      Earn +50 Coins & Stat Boosts on Rules & Geometry
-                    </div>
-                  </div>
-                </button>
-
-                <button
-                  onClick={() => {
-                    soundFX.playClick();
-                    if (onStartMatchWithClassmate) onStartMatchWithClassmate();
-                    onClose();
-                  }}
-                  className="w-full p-4 rounded-2xl bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 font-black text-left transition-all cursor-pointer flex items-center gap-4 hover:brightness-110 shadow-lg"
-                >
-                  <div className="w-12 h-12 rounded-2xl bg-slate-950/20 text-slate-950 flex items-center justify-center font-black shrink-0">
-                    <Trophy className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-black uppercase tracking-wide">
-                      Start Recess Four Square Match
-                    </div>
-                    <div className="text-xs font-bold text-slate-900/80">
-                      Head to the court with the classroom lineup
-                    </div>
-                  </div>
-                </button>
-              </div>
-            </div>
-          ) : activeTab === 'lessons' ? (
-            /* Tab 2: Optional Quizzes Curriculum */
-            <div className="space-y-4 my-auto">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-mono font-black text-amber-400 uppercase tracking-widest">
-                  OPTIONAL THEORY QUIZZES
-                </div>
-                <span className="text-[11px] font-mono text-slate-400">
-                  {completedLessons.length} / {LESSON_QUIZZES.length} Passed
-                </span>
-              </div>
-
-              <div className="space-y-3">
-                {LESSON_QUIZZES.map((quiz) => {
-                  const isDone = completedLessons.includes(quiz.id);
-                  return (
-                    <div
-                      key={quiz.id}
-                      className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2 text-left"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-mono text-cyan-400 font-bold">{quiz.subject}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-400/10 text-amber-300 border border-amber-400/30">
-                          {quiz.statBonus}
-                        </span>
-                      </div>
-
-                      <h3 className="font-black text-sm text-white">{quiz.title}</h3>
-                      <p className="text-xs text-slate-400 leading-relaxed">{quiz.description}</p>
-
-                      <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
-                        <span className="text-[11px] text-slate-500 font-mono">
-                          Taught by {quiz.teacher} • +{quiz.rewardCoins} Coins
-                        </span>
-
-                        {isDone ? (
-                          <span className="flex items-center gap-1 text-xs font-black text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-xl border border-emerald-500/30">
-                            <Check className="w-3.5 h-3.5" />
-                            <span>Passed</span>
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => handleStartQuiz(quiz)}
-                            className="px-3.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs transition-colors cursor-pointer flex items-center gap-1.5 shadow"
-                          >
-                            <Play className="w-3 h-3 fill-slate-950" />
-                            <span>Take Quiz</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            /* Tab 3: Classmates Roster */
-            <div className="space-y-4 my-auto text-left">
-              <div className="text-xs font-mono font-black text-amber-400 uppercase tracking-widest">
-                CLASSMATES & CLASSROOM CHALLENGERS
-              </div>
-
-              <div className="space-y-2.5">
-                {classroomStudents.map((student, sIdx) => (
-                  <div
-                    key={student.id}
-                    className="p-3 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between hover:border-amber-400/40 transition-colors"
-                  >
-                    <div
-                      className="flex items-center gap-3 cursor-pointer flex-1"
-                      onClick={() => setInspectedClassmate(student)}
-                    >
-                      <div
-                        className="w-10 h-10 rounded-xl flex items-center justify-center font-black text-white text-sm shrink-0 shadow"
-                        style={{ backgroundColor: student.avatarColor }}
-                      >
-                        {student.name[0]}
-                      </div>
-                      <div>
-                        <div className="font-black text-sm text-white flex items-center gap-2">
-                          <span>{student.name}</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
-                            Desk #{sIdx + 1}
-                          </span>
-                        </div>
-                        <div className="text-xs text-amber-300">{student.nickname}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setInspectedClassmate(student)}
-                        className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold cursor-pointer"
-                        title="Talk to Student"
-                      >
-                        <MessageCircle className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          if (onStartMatchWithClassmate) onStartMatchWithClassmate(student);
-                          onClose();
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs cursor-pointer shadow"
-                      >
-                        Challenge
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+      </section>
     </div>
   );
 };

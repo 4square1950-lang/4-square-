@@ -605,21 +605,7 @@ export function getNextLadderVenueId(currentId: VenueId): VenueId | null {
   return null;
 }
 
-export function loadCampaignProgress(): CampaignProgress {
-  try {
-    const raw = localStorage.getItem(CAMPAIGN_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      // Ensure current venue exists in VENUES; otherwise default to Tenth City (Buenos Aires)
-      if (!VENUES.some((v) => v.id === parsed.currentVenueId)) {
-        parsed.currentVenueId = 'buenos_aires_argentina';
-      }
-      return parsed;
-    }
-  } catch (err) {
-    console.error('Failed to load campaign progress:', err);
-  }
-
+export function createCampaignProgress(): CampaignProgress {
   // Starts at the Tenth City (Buenos Aires, Argentina) and works up to the First City (Maine)!
   return {
     unlockedVenues: ['buenos_aires_argentina'],
@@ -642,9 +628,68 @@ export function loadCampaignProgress(): CampaignProgress {
   };
 }
 
-export function saveCampaignProgress(progress: CampaignProgress) {
+export function loadCampaignProgress(storage: Pick<Storage, 'getItem'> = localStorage): CampaignProgress {
+  const initial = createCampaignProgress();
+  for (const key of [CAMPAIGN_STORAGE_KEY, 'foursquare_campaign_progress_v1']) {
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) continue;
+      const saved = JSON.parse(raw) as Partial<CampaignProgress> | null;
+      if (!saved || !Array.isArray(saved.unlockedVenues) || !Array.isArray(saved.completedVenues)) continue;
+      const completedVenues = [...new Set(saved.completedVenues.filter((id) => LADDER_VENUES.includes(id)))];
+      const unlockedVenues = [...new Set([
+        LADDER_VENUES[0],
+        ...saved.unlockedVenues.filter((id) => LADDER_VENUES.includes(id)),
+        ...completedVenues,
+      ])];
+      return {
+        ...initial,
+        ...saved,
+        completedVenues,
+        unlockedVenues,
+        currentVenueId: saved.currentVenueId && unlockedVenues.includes(saved.currentVenueId)
+          ? saved.currentVenueId
+          : initial.currentVenueId,
+        venueRecords: { ...initial.venueRecords, ...saved.venueRecords },
+      };
+    } catch (error) {
+      console.warn('Failed to read campaign progress:', error);
+    }
+  }
+  return initial;
+}
+
+export function recordCampaignWin(
+  progress: CampaignProgress,
+  venue: VenueDef,
+  crownHolds: number,
+  coins: number,
+  completedDate: string,
+): CampaignProgress {
+  if (!progress.unlockedVenues.includes(venue.id) || crownHolds < venue.campaignObjective.requiredCrownHolds) return progress;
+  const next = getNextLadderVenueId(venue.id);
+  const record = progress.venueRecords[venue.id];
+  return {
+    ...progress,
+    coins: Math.max(progress.coins, coins),
+    matchesWon: (progress.matchesWon ?? 0) + 1,
+    completedVenues: [...new Set([...progress.completedVenues, venue.id])],
+    unlockedVenues: next ? [...new Set([...progress.unlockedVenues, next])] : progress.unlockedVenues,
+    venueRecords: {
+      ...progress.venueRecords,
+      [venue.id]: {
+        ...record,
+        bestStreak: Math.max(record?.bestStreak ?? 0, crownHolds),
+        completedDate: record?.completedDate ?? completedDate,
+        notes: record?.notes ?? [],
+      },
+    },
+  };
+}
+
+export function saveCampaignProgress(progress: CampaignProgress, storage: Pick<Storage, 'setItem'> = localStorage) {
   try {
-    localStorage.setItem(CAMPAIGN_STORAGE_KEY, JSON.stringify(progress));
+    storage.setItem(CAMPAIGN_STORAGE_KEY, JSON.stringify(progress));
   } catch (err) {
     console.error('Failed to save campaign progress:', err);
   }

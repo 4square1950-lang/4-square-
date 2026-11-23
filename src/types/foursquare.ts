@@ -42,6 +42,7 @@ export interface BallState {
   isLive: boolean;
   isServing: boolean;
   hitCount?: number;
+  lastContact?: { x: number; y: number; z: number };
 }
 
 export type RefereeCallType = 
@@ -65,6 +66,7 @@ export interface RefereeCall {
   message: string;
   subMessage?: string;
   offendingPlayerName?: string;
+  offendingSquare?: SquareId;
   advancingSummary?: string;
   timestamp: number;
 }

@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { X, Users, Play, Gamepad2, Sparkles, Check } from 'lucide-react';
 import { CHARACTERS } from '../utils/characters';
+import { DEFAULT_LOCAL_PICKS, LOCAL_SEATS } from '../services/localMultiplayer';
 
 interface LocalMultiplayerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onStartLocalMatch: (playersConfig: Array<{ id: string; name: string; characterId: string; controlsLabel: string }>) => void;
+  onStartLocalMatch: (characterIds: string[]) => void;
 }
 
 export const LocalMultiplayerModal: React.FC<LocalMultiplayerModalProps> = ({
@@ -14,35 +15,12 @@ export const LocalMultiplayerModal: React.FC<LocalMultiplayerModalProps> = ({
   onStartLocalMatch,
 }) => {
   const [playerCount, setPlayerCount] = useState<2 | 3 | 4>(2);
-  const [selectedChars, setSelectedChars] = useState<string[]>([
-    'char-patch',
-    'char-blocky',
-    'char-skater-roxy',
-    'char-fang-wolf',
-  ]);
+  const [selectedChars, setSelectedChars] = useState(() => [...DEFAULT_LOCAL_PICKS]);
 
   if (!isOpen) return null;
 
-  const controlSchemes = [
-    { p: 1, name: 'Player 1', keys: 'WASD + Space / Click', color: 'text-rose-400', square: 'Square 1' },
-    { p: 2, name: 'Player 2', keys: 'Arrow Keys + Enter / 0', color: 'text-amber-400', square: 'Square 2' },
-    { p: 3, name: 'Player 3', keys: 'I J K L + Space / U', color: 'text-emerald-400', square: 'Square 3' },
-    { p: 4, name: 'Player 4', keys: 'T F G H + Enter / Y', color: 'text-blue-400', square: 'Square 4' },
-  ];
-
   const handleStart = () => {
-    const config = [];
-    for (let i = 0; i < playerCount; i++) {
-      const scheme = controlSchemes[i];
-      const char = CHARACTERS.find((c) => c.id === selectedChars[i]) || CHARACTERS[i];
-      config.push({
-        id: `local-p${i + 1}`,
-        name: `${scheme.name} (${char.name})`,
-        characterId: char.id,
-        controlsLabel: scheme.keys,
-      });
-    }
-    onStartLocalMatch(config);
+    onStartLocalMatch(selectedChars.slice(0, playerCount));
     onClose();
   };
 
@@ -95,24 +73,25 @@ export const LocalMultiplayerModal: React.FC<LocalMultiplayerModalProps> = ({
 
           {/* Player roster cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {controlSchemes.slice(0, playerCount).map((ctrl, i) => (
+            {LOCAL_SEATS.slice(0, playerCount).map((ctrl, i) => (
               <div
-                key={ctrl.p}
+                key={ctrl.id}
                 className="p-3 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-2"
               >
                 <div className="flex items-center justify-between">
                   <span className={`text-xs font-black ${ctrl.color}`}>{ctrl.name}</span>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-bold">
-                    {ctrl.square}
+                    Square {ctrl.startSquare}
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-400">
-                  Controls: <strong className="text-slate-200">{ctrl.keys}</strong>
+                  Squares 1–4: <strong className="text-slate-200">{ctrl.keysLabel}</strong> · Quick shot: {ctrl.quickLabel}
                 </div>
 
                 {/* Character Picker for this slot */}
                 <select
                   value={selectedChars[i]}
+                  aria-label={`${ctrl.name} character`}
                   onChange={(e) => {
                     const next = [...selectedChars];
                     next[i] = e.target.value;

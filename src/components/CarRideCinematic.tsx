@@ -1,5 +1,9 @@
+import { daylightAt } from '../services/venueDaylight';
+import { trafficTravel } from '../utils/trafficCollision';
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import {
   FastForward,
   Radio,
@@ -20,8 +24,11 @@ import {
   buildCharacterMesh,
   applySeatedDriverPose,
 } from '../utils/characterModelBuilder';
-import { CHARACTERS, CharacterCustomization } from '../utils/characters';
+import { CHARACTERS, DEFAULT_CUSTOMIZATION, CharacterCustomization } from '../utils/characters';
 import { soundFX } from '../services/soundEffects';
+import { buildRoadside, getRegionalRoad, makeRoadTexture } from '../utils/roadTripScenery';
+import { buildCampusSchool } from '../utils/campusScene';
+import { SCHOOL } from '../utils/campusLayout';
 
 type EnvironmentTime = 'sunny' | 'sunset' | 'night';
 
@@ -33,6 +40,7 @@ interface CarRideCinematicProps {
   currentTrackName?: string;
   onNextTrack?: () => void;
   customization?: CharacterCustomization;
+  characterId?: string;
 }
 
 const TOTAL_DRIVE_SECONDS = 16.0; // Fast, snappy, arcade 16-second trip
@@ -45,6 +53,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
   currentTrackName = 'Serve It Straight',
   onNextTrack,
   customization,
+  characterId,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -53,12 +62,14 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
   const currentDriveTimeRef = useRef(0);
 
   // Settings & Interactivity
-  const [timeOfDay, setTimeOfDay] = useState<EnvironmentTime>('sunny');
+  const timeOfDay: EnvironmentTime = daylightAt(toVenue.id);
+  const timeOfDayRef = useRef(timeOfDay);
+  timeOfDayRef.current = timeOfDay;
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isTurboActive, setIsTurboActive] = useState(false);
   const isTurboActiveRef = useRef(false);
   const [speedMph, setSpeedMph] = useState(45);
-  const [phaseText, setPhaseText] = useState('Cruising toward school entrance...');
+  const [phaseText, setPhaseText] = useState('Boarding');
 
   // Autonomous Cruise & Chauffeur Drive (user sits back and enjoys arrival)
   const activateTurbo = () => {
@@ -129,11 +140,12 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
       }
     };
 
-    const envCfg = getEnvConfig(timeOfDay);
+    let activeTime = timeOfDayRef.current;
+    const envCfg = getEnvConfig(activeTime);
     scene.background = new THREE.Color(envCfg.skyColor);
     scene.fog = new THREE.FogExp2(envCfg.fogColor, envCfg.fogDensity);
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 300);
+    const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 340);
     camera.position.set(4.2, 2.8, 7.5);
     camera.lookAt(0, 1.1, 0);
 
@@ -144,25 +156,76 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
       renderer = new THREE.WebGLRenderer({ antialias: false });
     }
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
     container.innerHTML = '';
     container.appendChild(renderer.domElement);
 
     // Lights
-    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x1e293b, 1.3);
+    const hemiLight = new THREE.HemisphereLight(0xe4f3ff, 0x796955, 0.72);
     scene.add(hemiLight);
 
     const sun = new THREE.DirectionalLight(envCfg.sunColor, envCfg.sunIntensity);
-    sun.position.set(20, 32, 16);
+    sun.position.set(-8.4, 12.6, -5.8);
     sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = sun.shadow.camera.bottom = -23;
+    sun.shadow.camera.right = sun.shadow.camera.top = 23;
+    sun.shadow.camera.far = 55;
+    sun.shadow.normalBias = 0.025;
+    sun.shadow.bias = -0.0003;
     scene.add(sun);
 
+    const rim = new THREE.DirectionalLight(0xb3d8ff, 0.60);
+    rim.position.set(6, 3.6, 9);
+    scene.add(rim);
+
+    let disposed = false;
+    let daylight: THREE.DataTexture | undefined;
+    // Cloud Layers by Greg Zaal (Poly Haven, CC0), used for daylight and reflections.
+    new HDRLoader().load('/assets/lighting/cloud-layers-1k.hdr', (texture) => {
+      if (disposed) {
+        texture.dispose();
+        return;
+      }
+      daylight = texture;
+      daylight.mapping = THREE.EquirectangularReflectionMapping;
+      scene.environment = daylight;
+      updateDaylight();
+    }, undefined, () => {});
+
+    function updateDaylight() {
+      const config = getEnvConfig(activeTime);
+      const isDay = activeTime === 'sunny';
+      const isNight = activeTime === 'night';
+      scene.background = isDay && daylight ? daylight : new THREE.Color(config.skyColor);
+      scene.backgroundRotation.y = 0.7;
+      scene.backgroundIntensity = 0.76;
+      scene.backgroundBlurriness = isDay ? 0.035 : 0;
+      scene.environmentIntensity = isNight ? 0.19 : isDay ? 0.82 : 0.49;
+      if (scene.fog) scene.fog.color.set(config.fogColor);
+      sun.color.set(config.sunColor);
+      sun.intensity = config.sunIntensity;
+      sun.position.set(-8.4, isDay ? 12.6 : 4.7, -5.8);
+      hemiLight.intensity = isNight ? 0.33 : 0.72;
+      rim.intensity = isNight ? 0.95 : 0.60;
+    }
+    updateDaylight();
+
     // Player Road Trip Hatchback Car (Base rotation Math.PI so headlights face forward down highway)
-    const playerCar = buildRoadTripCar('#2563eb');
+    const region = getRegionalRoad(toVenue.id);
+    const playerCar = buildRoadTripCar(region.paint, true,
+      region.surface === 'rural' ? 'carrier' : region.mark === 'tram' ? 'none' : 'cases', true);
     playerCar.position.set(2.0, 0, 0);
     playerCar.rotation.set(0, Math.PI, 0);
     scene.add(playerCar);
+    const nightBeam = new THREE.SpotLight(0xe1f0ff, 0, 27, 0.47, 0.76, 2);
+    nightBeam.position.set(0, 0.68, 2.16);
+    nightBeam.target.position.set(0, 0, 14);
+    playerCar.add(nightBeam, nightBeam.target);
 
     // Curbside door when car is facing forward (at model -X, world +X curbside)
     const carBodyGroup = (playerCar.getObjectByName('carBodyGroup') as THREE.Group | undefined) || playerCar;
@@ -174,7 +237,14 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     const rearWheelR = playerCar.getObjectByName('rearWheelRight') as THREE.Group | undefined;
 
     // Player Avatar Mesh (reflects customized creature/character model)
-    const playerMesh = buildCharacterMesh(CHARACTERS[0], customization);
+    const adult = CHARACTERS.find(({ id }) => id === 'char-ref-leo') ?? CHARACTERS[0];
+    const chauffeur = buildCharacterMesh(adult, { ...DEFAULT_CUSTOMIZATION, shirtColor:'#465146', shirtPattern:'solid', hairStyle:'buzz', hairColor:'#ada59a', skinColor:'#8a604a' });
+    chauffeur.scale.setScalar(.91);
+    chauffeur.position.set(.46,.22,.04);
+    carBodyGroup.add(chauffeur);
+    applySeatedDriverPose(chauffeur, 1);
+    const rider = CHARACTERS.find(({ id }) => id === characterId) ?? CHARACTERS[0];
+    const playerMesh = buildCharacterMesh(rider, customization);
     playerMesh.position.set(4.25, 0, 1.95);
     playerMesh.visible = true;
     scene.add(playerMesh);
@@ -185,45 +255,54 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     const playerLegL = playerMesh.getObjectByName('leftLeg') as THREE.Group | undefined;
     const playerShinL = playerMesh.getObjectByName('leftShin') as THREE.Group | undefined;
     const playerShinR = playerMesh.getObjectByName('rightShin') as THREE.Group | undefined;
-    let isDriverAttachedToCabin = false;
+    let isRiderAttachedToCabin = false;
 
     // 4-Lane Asphalt Road
-    const roadMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      roughness: 0.75,
-      metalness: 0.05,
-    });
-    const road = new THREE.Mesh(new THREE.PlaneGeometry(20.0, 360).rotateX(-Math.PI / 2), roadMat);
+    const roadTexture = makeRoadTexture(region.surface);
+    const roadMat = new THREE.MeshStandardMaterial({ map: roadTexture, roughness: 0.88 });
+    const road = new THREE.Mesh(new THREE.PlaneGeometry(region.width, 360).rotateX(-Math.PI / 2), roadMat);
     road.receiveShadow = true;
     scene.add(road);
+    const roadside = buildRoadside(toVenue);
+    scene.add(roadside);
 
-    // Center Solid Yellow Line (and solid white outer lane lines)
     const laneLinesGroup = new THREE.Group();
-    const solidYellowMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
-    const solidWhiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-
-    // Continuous Solid Double Yellow Line running entire 360m highway
-    const y1 = new THREE.Mesh(new THREE.PlaneGeometry(0.14, 360).rotateX(-Math.PI / 2), solidYellowMat);
-    y1.position.set(-0.15, 0.015, 0);
-    const y2 = new THREE.Mesh(new THREE.PlaneGeometry(0.14, 360).rotateX(-Math.PI / 2), solidYellowMat);
-    y2.position.set(0.15, 0.015, 0);
-    laneLinesGroup.add(y1, y2);
-
-    // Continuous Solid White Lane Boundary Lines
-    const wL = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 360).rotateX(-Math.PI / 2), solidWhiteMat);
-    wL.position.set(-4.5, 0.015, 0);
-    const wR = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 360).rotateX(-Math.PI / 2), solidWhiteMat);
-    wR.position.set(4.5, 0.015, 0);
-    laneLinesGroup.add(wL, wR);
+    const yellow = new THREE.MeshBasicMaterial({ color: 0xe7bc58 });
+    const white = new THREE.MeshBasicMaterial({ color: 0xe4e1d2 });
+    const rail = new THREE.MeshStandardMaterial({ color: 0x74818a, roughness: .35, metalness: .65 });
+    const line = (x: number, length: number, z: number, material: THREE.Material) => {
+      const marking = new THREE.Mesh(new THREE.PlaneGeometry(.12, length).rotateX(-Math.PI / 2), material);
+      marking.position.set(x, .015, z);
+      laneLinesGroup.add(marking);
+    };
+    if (region.mark === 'double') {
+      line(-.15, 360, 0, yellow);
+      line(.15, 360, 0, yellow);
+    } else if (region.mark === 'tram') {
+      for (const x of [-1.2,-.7,.7,1.2]) line(x, 360, 0, rail);
+    } else {
+      for (let z = -176; z <= 176; z += 8) line(0, 4.1, z, white);
+    }
+    if (region.lanes === 2) {
+      for (let z = -174; z <= 174; z += 12) for (const x of [-3.65,3.65]) line(x, 5.3, z, white);
+    }
+    const shoulder = region.lanes === 1 ? 4.25 : 7.5;
+    line(-shoulder, 360, 0, white);
+    line(shoulder, 360, 0, white);
     scene.add(laneLinesGroup);
-
     // Highway Curbs & Guardrails
     const guardMat = new THREE.MeshStandardMaterial({ color: 0xcfd8dc, metalness: 0.85, roughness: 0.3 });
-    const guardL = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.7, 360), guardMat);
-    guardL.position.set(-9.8, 0.55, 0);
-    const guardR = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.7, 360), guardMat);
-    guardR.position.set(9.8, 0.55, 0);
-    scene.add(guardL, guardR);
+    const guardX = region.width / 2 + .55;
+    const guardrail = new THREE.InstancedMesh(new THREE.BoxGeometry(0.10, 0.23, 360), guardMat, 2);
+    guardrail.setMatrixAt(0, new THREE.Matrix4().makeTranslation(-guardX, 0.53, 0));
+    guardrail.setMatrixAt(1, new THREE.Matrix4().makeTranslation(guardX, 0.53, 0));
+    const guardPosts = new THREE.InstancedMesh(new THREE.BoxGeometry(0.10, 0.70, 0.13), guardMat, 122);
+    for (let index = 0; index < 61; index++) {
+      const z = -178 + index * 5.9;
+      guardPosts.setMatrixAt(index * 2, new THREE.Matrix4().makeTranslation(-guardX, 0.29, z));
+      guardPosts.setMatrixAt(index * 2 + 1, new THREE.Matrix4().makeTranslation(guardX, 0.29, z));
+    }
+    scene.add(guardrail, guardPosts);
 
     // Glowing Neon Speed Boost Pads on Highway
     const boostPadsGroup = new THREE.Group();
@@ -245,60 +324,34 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     const schoolArrivalGroup = new THREE.Group();
     schoolArrivalGroup.position.set(0, 0, -220);
 
-    const pillarMat = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.8 });
-    const pLeft = new THREE.Mesh(new THREE.BoxGeometry(1.6, 4.2, 1.6), pillarMat);
-    pLeft.position.set(-8.5, 2.1, 0);
-    const pRight = new THREE.Mesh(new THREE.BoxGeometry(1.6, 4.2, 1.6), pillarMat);
-    pRight.position.set(8.5, 2.1, 0);
-
-    // School Archway Banner spanning full 17m road
-    const archCanvas = document.createElement('canvas');
-    archCanvas.width = 1024;
-    archCanvas.height = 128;
-    const actx = archCanvas.getContext('2d');
-    if (actx) {
-      actx.fillStyle = '#1e3a8a';
-      actx.fillRect(0, 0, 1024, 128);
-      actx.strokeStyle = '#f59e0b';
-      actx.lineWidth = 6;
-      actx.strokeRect(4, 4, 1016, 120);
-      actx.fillStyle = '#fbbf24';
-      actx.font = 'bold 36px sans-serif';
-      actx.textAlign = 'center';
-      actx.fillText(`★ ${toVenue.name.toUpperCase()} ★`, 512, 54);
-      actx.font = 'bold 24px sans-serif';
-      actx.fillStyle = '#ffffff';
-      actx.fillText('WELCOME TOURNAMENT CONTENDERS', 512, 98);
-    }
-    const archTex = new THREE.CanvasTexture(archCanvas);
-    const archSign = new THREE.Mesh(
-      new THREE.PlaneGeometry(17.0, 1.8),
-      new THREE.MeshStandardMaterial({ map: archTex, roughness: 0.4 })
-    );
-    archSign.position.set(0, 4.8, 0);
-    archSign.rotation.y = Math.PI;
+    const school = buildCampusSchool(toVenue.id);
+    school.rotation.y = Math.PI;
+    school.position.z = SCHOOL.front - 9.6;
 
     // School Sidewalk & Drop-Off Curb on right side (x >= 4.8)
     const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.8 });
     const sidewalk = new THREE.Mesh(new THREE.BoxGeometry(5.0, 0.25, 40), sidewalkMat);
     sidewalk.position.set(7.5, 0.12, 0);
-    const curb = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.35, 40), new THREE.MeshStandardMaterial({ color: 0xfacc15 }));
+    const curb = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.35, 40), new THREE.MeshStandardMaterial({ color: 0xa5a198 }));
     curb.position.set(4.9, 0.17, 0);
 
-    schoolArrivalGroup.add(pLeft, pRight, archSign, sidewalk, curb);
+    schoolArrivalGroup.add(school, sidewalk, curb);
     scene.add(schoolArrivalGroup);
 
     // Surrounding Traffic Vehicles with Strict 4-Lane Layout
     // Lane -2 (-5.5), Lane -1 (-2.0), Lane +1 (+2.0), Lane +2 (+5.5)
     const trafficCars: { mesh: THREE.Group; speed: number; direction: number; laneX: number }[] = [];
     const trafficCount = 5;
-    const trafficPalette = ['#dc2626', '#16a34a', '#eab308', '#9333ea', '#ea580c'];
+    const trafficPalette = ['#832e33', '#515b5c', '#9a8466', '#4c5167', '#bfc4c1'];
+    const trafficTire = new THREE.CylinderGeometry(0.325, 0.325, 0.24, 16).rotateZ(Math.PI / 2);
+    const trafficRubber = new THREE.MeshStandardMaterial({ color: 0x14191c, roughness: 0.91 });
+    const trafficGlass = new THREE.MeshStandardMaterial({ color: 0x1b3546, roughness: 0.19, metalness: 0.5 });
 
     for (let t = 0; t < trafficCount; t++) {
       const isOncoming = t % 2 === 1;
-      const laneX = isOncoming
+      const laneX = region.side * (region.lanes === 1 ? (isOncoming ? -2.1 : 2.1) : isOncoming
         ? (t % 4 === 1 ? -2.0 : -5.5)
-        : (t % 4 === 0 ? 5.5 : 2.0);
+        : (t % 4 === 0 ? 5.5 : 2.0));
       const zPos = -120 + t * 65;
 
       const vGroup = new THREE.Group();
@@ -307,14 +360,22 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         roughness: 0.35,
         metalness: 0.5,
       });
-      const cBody = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.7, 4.0), carMat);
+      const cBody = new THREE.Mesh(new RoundedBoxGeometry(1.9, 0.65, 4.05, 2, 0.18), carMat);
       cBody.position.y = 0.65;
       const cCabin = new THREE.Mesh(
-        new THREE.BoxGeometry(1.7, 0.55, 2.0),
-        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.2, metalness: 0.8 })
+        new RoundedBoxGeometry(1.66, region.surface === 'rural' && t % 2 === 0 ? .84 : .58,
+          region.surface === 'stone' ? 1.67 : 1.99, 2, 0.21),
+        trafficGlass
       );
       cCabin.position.set(0, 1.15, -0.2);
       vGroup.add(cBody, cCabin);
+      for (const x of [-0.89, 0.89]) {
+        for (const z of [-1.27, 1.27]) {
+          const tire = new THREE.Mesh(trafficTire, trafficRubber);
+          tire.position.set(x, 0.325, z);
+          vGroup.add(tire);
+        }
+      }
 
       vGroup.position.set(laneX, 0, zPos);
       if (isOncoming) vGroup.rotation.y = 0; // Oncoming travels towards +Z: headlights face +Z
@@ -339,15 +400,23 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     let animId: number;
     let lastClockTime = performance.now();
     let carSteerHeading = 0;
+    let cruiseSpeed = 0;
+    const doorTransferPoint = new THREE.Vector3();
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const now = performance.now();
-      const deltaSec = Math.min(0.1, (now - lastClockTime) / 1000);
+      if (activeTime !== timeOfDayRef.current) {
+        activeTime = timeOfDayRef.current;
+        updateDaylight();
+      }
+      nightBeam.intensity = activeTime === 'night' ? 105 : 0;
+      const elapsedSeconds = (now - lastClockTime) / 1000;
+      const deltaSec = Math.min(0.1, elapsedSeconds);
       lastClockTime = now;
 
       // Advance fast drive clock
-      currentDriveTimeRef.current += deltaSec;
+      currentDriveTimeRef.current += elapsedSeconds;
       if (currentDriveTimeRef.current >= TOTAL_DRIVE_SECONDS) {
         currentDriveTimeRef.current = TOTAL_DRIVE_SECONDS;
       }
@@ -361,34 +430,58 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         applySeatedDriverPose(playerMesh, 0, 0);
       };
 
-      const ensureDriverDetachedToWorld = (wx: number, wy: number, wz: number, wyRot: number) => {
-        if (isDriverAttachedToCabin) {
+      const positionRiderOnFoot = (wx: number, wy: number, wz: number, wyRot: number) => {
+        if (isRiderAttachedToCabin) {
           carBodyGroup.remove(playerMesh);
           scene.add(playerMesh);
-          isDriverAttachedToCabin = false;
+          isRiderAttachedToCabin = false;
         }
         playerMesh.position.set(wx, wy, wz);
         playerMesh.rotation.set(0, wyRot, 0);
       };
 
-      const ensureDriverAttachedInCabin = (steer: number) => {
-        if (!isDriverAttachedToCabin) {
+      const riderScale = .84;
+      const seatPassenger = (steer: number) => {
+        if (!isRiderAttachedToCabin) {
           scene.remove(playerMesh);
           carBodyGroup.add(playerMesh);
-          isDriverAttachedToCabin = true;
+          isRiderAttachedToCabin = true;
         }
         playerMesh.visible = true;
-        playerMesh.scale.setScalar(0.84);
-        playerMesh.position.set(-0.46, 0.17, 0.04);
+        playerMesh.scale.setScalar(riderScale);
+        playerMesh.position.set(-0.46, .22, .04);
         playerMesh.rotation.set(0, 0, 0);
-        applySeatedDriverPose(playerMesh, 1.0, steer);
+        applySeatedDriverPose(playerMesh, 1, 0, false);
+        applySeatedDriverPose(chauffeur, 1, steer);
+      };
+
+      // Turn and lift the knees outside the door before moving laterally over the sill.
+      const moveThroughDoor = (progress: number) => {
+        const t = THREE.MathUtils.clamp(progress, 0, 1);
+        const approach = THREE.MathUtils.smoothstep(t, 0, .43);
+        const cross = THREE.MathUtils.smoothstep(t, .43, .82);
+        const settle = THREE.MathUtils.smoothstep(t, .82, 1);
+        const lift = THREE.MathUtils.smoothstep(t, .20, .43);
+        const x = -2.18 + .73 * approach + .99 * cross;
+        const z = -.8 + .70 * approach + .14 * settle;
+        const y = .32 * lift - .10 * settle;
+        doorTransferPoint.set(x,y,z);
+        carBodyGroup.localToWorld(doorTransferPoint);
+        const yaw = -1.92 + .35 * approach - 1.57 * cross;
+        positionRiderOnFoot(doorTransferPoint.x,doorTransferPoint.y,doorTransferPoint.z,yaw);
+        playerMesh.scale.setScalar(riderScale);
+        playerMesh.rotation.x = .32 * lift * (1 - settle);
+        applySeatedDriverPose(playerMesh, lift, 0, false);
+        const inwardStep = lift * (1-cross);
+        if (playerLegR) playerLegR.rotation.x += .38 * inwardStep;
+        if (playerShinR) playerShinR.rotation.x += .22 * inwardStep;
       };
 
       // -------------------------------------------------------------
       // PHASE 1: BOARDING & DOOR CLEARANCE (0s - 3.5s)
       // -------------------------------------------------------------
       if (tSec < 3.5) {
-        setPhaseText('Boarding Vehicle...');
+        setPhaseText('Boarding');
         setSpeedMph(0);
         trafficCars.forEach((tc) => (tc.mesh.visible = false));
         schoolArrivalGroup.visible = false;
@@ -400,14 +493,14 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         if (tSec < 1.05) {
           // Walk along sidewalk outside door sweep radius (4.25, 1.95) -> (3.75, 0.65)
           const walkT = tSec / 1.05;
-          ensureDriverDetachedToWorld(
-            THREE.MathUtils.lerp(4.25, 3.75, walkT),
+          positionRiderOnFoot(
+            THREE.MathUtils.lerp(4.7, 4.18, walkT),
             Math.abs(Math.sin(tSec * 14)) * 0.04,
-            THREE.MathUtils.lerp(1.95, 0.65, walkT),
+            THREE.MathUtils.lerp(1.95, .8, walkT),
             Math.atan2(3.75 - 4.25, 0.65 - 1.95)
           );
           playerMesh.visible = true;
-          playerMesh.scale.setScalar(1.0);
+          playerMesh.scale.setScalar(riderScale);
           setSeatedWalkReset();
 
           const walkCycle = Math.sin(tSec * 14);
@@ -425,17 +518,17 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
             playedDoorOpen = true;
           }
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.25, easeOpen);
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.67, easeOpen);
           }
           const approachYaw = Math.atan2(3.75 - 4.25, 0.65 - 1.95);
           const doorYaw = Math.atan2(3.12 - 3.75, 0.12 - 0.65);
-          ensureDriverDetachedToWorld(
-            3.75,
+          positionRiderOnFoot(
+            4.18,
             0,
-            0.65,
+            .8,
             THREE.MathUtils.lerp(approachYaw, doorYaw, easeOpen)
           );
-          playerMesh.scale.setScalar(1.0);
+          playerMesh.scale.setScalar(riderScale);
           setSeatedWalkReset();
           if (playerLegL) playerLegL.rotation.x = 0;
           if (playerLegR) playerLegR.rotation.x = 0;
@@ -444,49 +537,28 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         } else if (tSec < 2.95) {
           // Crouch & step cleanly through open doorway sill (3.75, 0.65) -> (3.12, 0.12) -> driver seat (2.46, 0.17, -0.04)
           const enterT = (tSec - 1.85) / 1.1;
-          if (curbsideDoor) curbsideDoor.rotation.y = 1.25;
+          if (curbsideDoor) curbsideDoor.rotation.y = 1.67;
           playerMesh.visible = true;
 
-          if (enterT < 0.45) {
-            const subT = enterT / 0.45;
-            const ease = subT * subT * (3 - 2 * subT);
-            ensureDriverDetachedToWorld(
-              THREE.MathUtils.lerp(3.75, 3.12, ease),
-              THREE.MathUtils.lerp(0, 0.04, ease),
-              THREE.MathUtils.lerp(0.65, 0.12, ease),
-              THREE.MathUtils.lerp(-2.2, -Math.PI / 2, ease)
-            );
-            playerMesh.scale.setScalar(THREE.MathUtils.lerp(1.0, 0.86, ease));
-            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0, 0.48, ease), 0);
-          } else {
-            const subT = (enterT - 0.45) / 0.55;
-            const ease = subT * subT * (3 - 2 * subT);
-            ensureDriverDetachedToWorld(
-              THREE.MathUtils.lerp(3.12, 2.46, ease),
-              THREE.MathUtils.lerp(0.04, 0.17, ease),
-              THREE.MathUtils.lerp(0.12, -0.04, ease),
-              THREE.MathUtils.lerp(-Math.PI / 2, Math.PI, ease)
-            );
-            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.86, 0.84, ease));
-            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0.48, 1.0, ease), 0);
-          }
+          moveThroughDoor(enterT);
         } else {
           // Driver cleanly seated inside cabin while door latches shut
           const shutT = (tSec - 2.95) / 0.55;
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.25, 0, Math.min(1, shutT));
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.67, 0, Math.min(1, shutT));
           }
           if (!playedDoorShut) {
             soundFX.playCarDoorSlam();
             playedDoorShut = true;
           }
-          ensureDriverAttachedInCabin(0);
+          seatPassenger(0);
           // Subtle cabin door-slam settle
           carBodyGroup.rotation.z = Math.sin(shutT * Math.PI) * -0.015;
         }
 
-        camera.position.set(5.8, 2.35, 4.4);
-        camera.lookAt(2.2, 1.05, 0);
+        const dolly = tSec / 3.5;
+        camera.position.set(6.55 - dolly * 0.45, 1.6 + dolly * 0.24, 4.82 - dolly * 0.34);
+        camera.lookAt(2.58, 0.99, 0.12);
       }
 
       // -------------------------------------------------------------
@@ -501,51 +573,27 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         schoolArrivalGroup.visible = false;
         if (curbsideDoor) curbsideDoor.rotation.y = 0;
 
-        // Base speed 85 mph, jumps to 135 mph on Turbo!
         const isTurbo = isTurboActiveRef.current;
-        const targetSpeed = isTurbo ? 135 : 85 + Math.sin(now * 0.003) * 6;
+        const requestedSpeed = isTurbo ? 85 : 53;
+        const gap=trafficCars.reduce((closest,traffic)=>{
+          const ahead=playerCar.position.z-traffic.mesh.position.z;
+          return traffic.direction>0 && ahead>0 && Math.abs(playerCar.position.x-traffic.mesh.position.x)<2.3
+            ? Math.min(closest,ahead) : closest;
+        },Infinity);
+        const limit=Math.min(requestedSpeed,Math.max(0,(gap-5)*3.5));
+        cruiseSpeed=THREE.MathUtils.lerp(cruiseSpeed,limit,1-Math.exp(-deltaSec*(limit<cruiseSpeed?9:2.6)));
+        const targetSpeed=cruiseSpeed;
         setSpeedMph(Math.round(targetSpeed));
-        setPhaseText(isTurbo ? '🚀 TURBO BOOST ACTIVE!' : 'High-Speed Highway Transit');
-
+        setPhaseText(limit<requestedSpeed?'Braking for traffic':isTurbo?'Boosting':'On the road');
         // Dynamic Camera FOV stretch on Turbo
-        const targetFov = isTurbo ? 62 : 45;
-        camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, 0.1);
+        const targetFov = isTurbo ? 51 : 39;
+        camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, 1 - Math.exp(-5.5 * deltaSec));
         camera.updateProjectionMatrix();
 
-        // Auto-swerving obstacle clearance logic:
-        let autoSwerveTargetX: number | null = null;
-        for (const tc of trafficCars) {
-          const distAhead = playerCar.position.z - tc.mesh.position.z;
-          const dx = Math.abs(tc.mesh.position.x - playerCar.position.x);
-
-          if (distAhead > 0 && distAhead < 32 && dx < 2.2) {
-            autoSwerveTargetX = playerCar.position.x < 3.75 ? 5.5 : 2.0;
-            break;
-          }
-
-          if (tc.direction < 0 && playerCar.position.x < 0.8) {
-            const zDist = Math.abs(tc.mesh.position.z - playerCar.position.z);
-            if (zDist < 35 && dx < 2.8) {
-              autoSwerveTargetX = 2.2;
-              break;
-            }
-          }
-        }
-
-        // Autonomous Chauffeur Guidance: smooth auto-lane keeping and evasive flow
-        if (autoSwerveTargetX !== null) {
-          const diff = autoSwerveTargetX - playerCar.position.x;
-          playerCar.position.x += Math.sign(diff) * Math.min(Math.abs(diff), 0.14);
-          carSteerHeading = THREE.MathUtils.clamp(diff * 0.14, -0.15, 0.15);
-        } else {
-          const laneTargetX = 2.0;
-          const diff = laneTargetX - playerCar.position.x;
-          playerCar.position.x += diff * 0.05;
-          carSteerHeading = THREE.MathUtils.clamp(diff * 0.1, -0.1, 0.1);
-        }
-
-        playerCar.position.x = THREE.MathUtils.clamp(playerCar.position.x, -5.8, 5.8);
-        playerCar.rotation.y = Math.PI - carSteerHeading;
+        // Hold the designated lane and brake for traffic ahead.
+        playerCar.position.x = region.side * 2.1;
+        carSteerHeading = 0;
+        playerCar.rotation.y = Math.PI;
 
         // Sprung carBodyGroup suspension heave, turbo squat & cornering roll (tires stay planted)
         carBodyGroup.position.y = Math.sin(now * 0.018) * 0.014;
@@ -561,7 +609,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         );
 
         // Keep seated driver visibly gripped to steering wheel inside cabin
-        ensureDriverAttachedInCabin(carSteerHeading);
+        seatPassenger(carSteerHeading);
         if (steeringWheel) steeringWheel.rotation.z = -carSteerHeading * 2.4;
 
         // Turn wheels in forward heading
@@ -569,7 +617,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         if (frontWheelR) frontWheelR.rotation.y = -carSteerHeading * 1.6;
 
         // Spin wheels forward
-        const spinDelta = (targetSpeed / 30) * deltaSec * 15;
+        const spinDelta = (targetSpeed / 30) * deltaSec * 10;
         ['frontWheelLeft', 'frontWheelRight', 'rearWheelLeft', 'rearWheelRight'].forEach((wn) => {
           const w = playerCar.getObjectByName(wn);
           const spin = w?.getObjectByName('spinWheel');
@@ -577,7 +625,10 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         });
 
         // Move road & boost pads backwards at thrilling speed
-        const moveDelta = (targetSpeed / 60) * 2.8;
+        const moveDelta = targetSpeed * 1.8 * deltaSec;
+        roadside.position.z += moveDelta * 0.10;
+        guardPosts.position.z = roadside.position.z % 5.9;
+        roadTexture.offset.y = (roadTexture.offset.y + moveDelta * 0.18) % 1;
 
         // Boost pads animation backwards
         boostPadsGroup.children.forEach((pad) => {
@@ -594,38 +645,23 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
         // Traffic AI cars movement with safe following distances
         trafficCars.forEach((tc, idx) => {
           tc.mesh.visible = true;
-          if (tc.direction < 0) {
-            tc.mesh.position.z += moveDelta + tc.speed * 1.5;
-            if (tc.mesh.position.z > 140) {
-              tc.mesh.position.z = -140 - idx * 25;
-            }
-          } else {
-            tc.mesh.position.z += (tc.speed - 1.15) * moveDelta;
-            if (tc.mesh.position.z > 140) {
-              tc.mesh.position.z = -140 - idx * 30;
-            } else if (tc.mesh.position.z < -140) {
-              tc.mesh.position.z = 140;
-            }
-          }
-
-          for (let j = 0; j < trafficCars.length; j++) {
-            if (j === idx) continue;
-            const other = trafficCars[j];
-            if (Math.abs(tc.mesh.position.x - other.mesh.position.x) < 1.0) {
-              const gap = other.mesh.position.z - tc.mesh.position.z;
-              if (gap > 0 && gap < 25) {
-                tc.mesh.position.z = other.mesh.position.z - 26;
-              }
-            }
-          }
+          const before = tc.mesh.position.z;
+          const advance = tc.direction < 0 ? moveDelta + tc.speed * 18 * deltaSec : (tc.speed - 1.15) * moveDelta;
+          const others = trafficCars.filter((other) => other !== tc).map(({ mesh }) => ({ x: mesh.position.x, z: mesh.position.z, halfX: 1.03, halfZ: 2.1 }));
+          others.push({ x: playerCar.position.x, z: playerCar.position.z, halfX: 1.1, halfZ: 2.12 });
+          const fraction = trafficTravel({ x: tc.mesh.position.x, z: before, halfX: 1.03, halfZ: 2.1 }, tc.mesh.position.x, before + advance, others);
+          tc.mesh.position.z = before + advance * fraction;
+          if (tc.mesh.position.z > 140) tc.mesh.position.z = -140 - idx * 25;
+          if (tc.mesh.position.z < -260) tc.mesh.position.z = 145 + idx * 25;
         });
 
-        // Dynamic Chase Camera with subtle vibration
-        const shake = isTurbo ? (Math.random() - 0.5) * 0.04 : 0;
-        camera.position.x = playerCar.position.x + 3.4 + shake;
-        camera.position.y = 2.6 + Math.sin(now * 0.005) * 0.12;
-        camera.position.z = playerCar.position.z + 6.8;
-        camera.lookAt(playerCar.position.x, 1.1, playerCar.position.z);
+        // Open in a rear three-quarter chase, then cut to a low leading angle.
+        const leadingAngle = tSec >= 8;
+        const shake = isTurbo ? Math.sin(now * 0.037) * 0.024 : 0;
+        camera.position.x = playerCar.position.x + (leadingAngle ? 5.12 : 4.34) + shake;
+        camera.position.y = (leadingAngle ? 1.44 : 1.98) + Math.sin(now * 0.004) * 0.043;
+        camera.position.z = playerCar.position.z + (leadingAngle ? -3.88 : 6.75);
+        camera.lookAt(playerCar.position.x, 0.96, playerCar.position.z - (leadingAngle ? 0.24 : 1.12));
       }
 
       // -------------------------------------------------------------
@@ -634,24 +670,25 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
       else {
         trafficCars.forEach((tc) => (tc.mesh.visible = false));
         schoolArrivalGroup.visible = true;
-        camera.fov = THREE.MathUtils.lerp(camera.fov, 45, 0.14);
+        roadside.position.z = 0;
+        camera.fov = THREE.MathUtils.lerp(camera.fov, 41, 1 - Math.exp(-7 * deltaSec));
         camera.updateProjectionMatrix();
 
         if (tSec < 13.4) {
           // Decelerate & Turn into School drop-off lane with nose-dive suspension settle
-          setPhaseText('Entering School Drop-Off Loop...');
+          setPhaseText('Arriving');
           const turnT = (tSec - 12.0) / 1.4;
-          const speed = THREE.MathUtils.lerp(65, 8, turnT);
+          const speed = THREE.MathUtils.lerp(cruiseSpeed, 0, turnT);
           setSpeedMph(Math.round(speed));
 
-          const steer = 0.14 * Math.sin(turnT * Math.PI);
-          playerCar.position.x = THREE.MathUtils.lerp(playerCar.position.x, 2.0, turnT);
+          const steer = 0;
+          playerCar.position.x = 2.0;
           playerCar.rotation.y = Math.PI - steer;
           carBodyGroup.rotation.x = THREE.MathUtils.lerp(0, 0.026, Math.sin(turnT * Math.PI));
           carBodyGroup.rotation.z = steer * 0.35;
-          schoolArrivalGroup.position.z = THREE.MathUtils.lerp(-120, 0, turnT);
+          schoolArrivalGroup.position.z = -38 * (1 - turnT) ** 2;
 
-          ensureDriverAttachedInCabin(steer);
+          seatPassenger(steer);
           if (frontWheelL) frontWheelL.rotation.y = -steer * 1.4;
           if (frontWheelR) frontWheelR.rotation.y = -steer * 1.4;
           if (steeringWheel) steeringWheel.rotation.z = -steer * 2.2;
@@ -663,11 +700,9 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
             if (spin) spin.rotation.x += spinDelta;
           });
 
-          camera.position.set(5.8, 2.6, 6.2);
-          camera.lookAt(playerCar.position.x, 1.1, 0);
         } else if (tSec < 14.15) {
           // Parked flush at curb -> door swings completely open BEFORE driver steps out
-          setPhaseText('Parked at Schoolyard Entrance');
+          setPhaseText('Parked');
           setSpeedMph(0);
           playerCar.position.set(2.0, 0, 0);
           playerCar.rotation.set(0, Math.PI, 0);
@@ -679,7 +714,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           if (frontWheelR) frontWheelR.rotation.y = 0;
           if (steeringWheel) steeringWheel.rotation.z = 0;
 
-          ensureDriverAttachedInCabin(0);
+          seatPassenger(0);
 
           if (!playedArrivalDoor) {
             soundFX.playCarDoorOpen();
@@ -687,48 +722,26 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           }
           const doorOpenT = (tSec - 13.4) / 0.75;
           const easeDoor = Math.sin((Math.min(1, doorOpenT) * Math.PI) / 2);
-          if (curbsideDoor) curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.25, easeDoor);
+          if (curbsideDoor) curbsideDoor.rotation.y = THREE.MathUtils.lerp(0, 1.67, easeDoor);
         } else if (tSec < 15.35) {
           // Step cleanly out of open doorway behind open door blade, then walk along sidewalk
-          setPhaseText('Stepping Out onto School Blacktop...');
+          setPhaseText('Arrived');
           const outT = (tSec - 14.15) / 1.2;
           playerMesh.visible = true;
-          if (curbsideDoor) curbsideDoor.rotation.y = 1.25;
+          if (curbsideDoor) curbsideDoor.rotation.y = 1.67;
 
-          if (outT < 0.42) {
-            // Pivot legs & slide crouch-height from driver seat -> open doorway sill
-            const subT = outT / 0.42;
-            const ease = subT * subT * (3 - 2 * subT);
-            ensureDriverDetachedToWorld(
-              THREE.MathUtils.lerp(2.46, 3.12, ease),
-              THREE.MathUtils.lerp(0.17, 0.04, ease),
-              THREE.MathUtils.lerp(-0.04, 0.14, ease),
-              THREE.MathUtils.lerp(Math.PI, Math.PI / 2, ease)
-            );
-            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.84, 0.88, ease));
-            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(1.0, 0.45, ease), 0);
-          } else if (outT < 0.72) {
-            // Step onto sidewalk outside door sweep arc & stand upright
-            const subT = (outT - 0.42) / 0.30;
-            const ease = subT * subT * (3 - 2 * subT);
-            ensureDriverDetachedToWorld(
-              THREE.MathUtils.lerp(3.12, 3.78, ease),
-              THREE.MathUtils.lerp(0.04, 0, ease),
-              THREE.MathUtils.lerp(0.14, 0.65, ease),
-              THREE.MathUtils.lerp(Math.PI / 2, Math.atan2(4.25 - 3.78, -0.85 - 0.65), ease)
-            );
-            playerMesh.scale.setScalar(THREE.MathUtils.lerp(0.88, 1.0, ease));
-            applySeatedDriverPose(playerMesh, THREE.MathUtils.lerp(0.45, 0, ease), 0);
+          if (outT < .73) {
+            moveThroughDoor(1-outT/.73);
           } else {
             // Walk clear down the sidewalk past the open door tip (door tip is at x=4.16, z=-0.17)
-            const subT = (outT - 0.72) / 0.28;
-            ensureDriverDetachedToWorld(
-              THREE.MathUtils.lerp(3.78, 4.35, subT),
+            const subT = (outT - .73) / .27;
+            positionRiderOnFoot(
+              THREE.MathUtils.lerp(4.18, 4.75, subT),
               Math.abs(Math.sin(subT * Math.PI * 3)) * 0.04,
-              THREE.MathUtils.lerp(0.65, -0.95, subT),
-              Math.atan2(4.35 - 3.78, -0.95 - 0.65)
+              THREE.MathUtils.lerp(.8, -.95, subT),
+              Math.atan2(.57,-1.75)
             );
-            playerMesh.scale.setScalar(1.0);
+            playerMesh.scale.setScalar(riderScale);
             setSeatedWalkReset();
             const walkCycle = Math.sin(subT * Math.PI * 3);
             if (playerLegL) playerLegL.rotation.x = walkCycle * 0.5;
@@ -740,20 +753,20 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           // Door shuts safely once player is past it; player strides to gate entrance
           const closeT = (tSec - 15.35) / 0.65;
           if (curbsideDoor) {
-            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.25, 0, Math.min(1, closeT * 1.4));
+            curbsideDoor.rotation.y = THREE.MathUtils.lerp(1.67, 0, Math.min(1, closeT * 1.4));
           }
           if (!playedArrivalShut) {
             soundFX.playCarDoorSlam();
             playedArrivalShut = true;
           }
           const finalWalk = Math.min(1, closeT);
-          ensureDriverDetachedToWorld(
-            4.35,
+          positionRiderOnFoot(
+            4.75,
             finalWalk < 0.85 ? Math.abs(Math.sin(finalWalk * Math.PI * 2)) * 0.03 : 0,
             THREE.MathUtils.lerp(-0.95, -2.1, finalWalk),
             Math.PI
           );
-          playerMesh.scale.setScalar(1.0);
+          playerMesh.scale.setScalar(riderScale);
           setSeatedWalkReset();
           const walkCycle = finalWalk < 0.85 ? Math.sin(finalWalk * Math.PI * 2) * (1 - finalWalk) : 0;
           if (playerLegL) playerLegL.rotation.x = walkCycle * 0.45;
@@ -762,8 +775,9 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
           if (playerArmR) playerArmR.rotation.x = walkCycle * 0.35;
         }
 
-        camera.position.set(6.4, 2.5, 5.2);
-        camera.lookAt(playerCar.position.x + 0.5, 1.05, -0.3);
+        const settle = THREE.MathUtils.smoothstep(tSec, 12, 15.9);
+        camera.position.set(6.1 + settle * 0.58, 2.03 - settle * 0.22, 6.88 - settle * 0.86);
+        camera.lookAt(playerCar.position.x + 0.66, 1.10, -0.66 - settle * 0.69);
       }
 
       renderer.render(scene, camera);
@@ -782,12 +796,30 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     window.addEventListener('resize', handleResize);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', handleResize);
+      const geometry = new Set<THREE.BufferGeometry>();
+      const materials = new Set<THREE.Material>();
+      const textures = new Set<THREE.Texture>();
+      if (daylight) textures.add(daylight);
+      scene.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        geometry.add(object.geometry);
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+          materials.add(material);
+          for (const value of Object.values(material)) if (value instanceof THREE.Texture) textures.add(value);
+        }
+        if (object instanceof THREE.InstancedMesh) object.dispose();
+      });
+      for (const item of geometry) item.dispose();
+      for (const item of materials) item.dispose();
+      for (const item of textures) item.dispose();
+      sun.shadow.dispose();
       renderer.dispose();
       container.innerHTML = '';
     };
-  }, [timeOfDay]);
+  }, [toVenue, characterId, customization]);
 
   // Complete drive when 16.0s is reached
   useEffect(() => {
@@ -800,115 +832,25 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
   }, [currentDriveTime, onArrival]);
 
   return (
-    <div className="fixed inset-0 z-50 w-screen h-screen bg-slate-950 flex flex-col select-none overflow-hidden animate-in fade-in duration-300">
-      {/* 3D Highway Stage */}
-      <div ref={containerRef} className="w-full h-full relative" />
-
-      {/* Top Header Overlay Bar */}
-      <div className="absolute top-4 left-4 right-4 flex items-center justify-between gap-3 pointer-events-none z-20">
-        {/* Destination & Phase Badge */}
-        <div className="p-3 rounded-2xl bg-slate-950/90 backdrop-blur-md border border-amber-400/50 shadow-xl flex items-center gap-3 pointer-events-auto">
-          <div className="w-10 h-10 rounded-xl bg-amber-400 text-slate-950 flex items-center justify-center font-black shadow">
-            <Car className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="text-[10px] font-mono tracking-wider uppercase text-amber-400 font-black flex items-center gap-1">
-              <Navigation className="w-3 h-3 animate-pulse" /> {phaseText}
-            </div>
-            <h2 className="text-sm sm:text-base font-black text-white">
-              To: {toVenue.name.replace('The ', '')}
-            </h2>
-          </div>
+    <div className="fixed inset-0 z-50 select-none overflow-hidden bg-neutral-950 text-stone-100">
+      <div ref={containerRef} className="absolute inset-0" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-wrap items-start justify-between gap-3 bg-gradient-to-b from-black/70 to-transparent p-4 sm:p-6">
+        <div className="pointer-events-auto max-w-[68%] rounded-xl bg-neutral-950/75 px-4 py-3 backdrop-blur">
+          <p className="text-xs text-amber-200">{phaseText} · {speedMph} mph</p>
+          <h2 className="mt-1 text-base font-black leading-tight sm:text-xl">{toVenue.name}</h2>
         </div>
-
-        {/* Speedometer & Turbo Gauge */}
-        <div className="flex items-center gap-2 pointer-events-auto">
-          <div className="px-3.5 py-1.5 rounded-2xl bg-slate-950/90 backdrop-blur-md border border-slate-800 text-right shadow-xl">
-            <div className="text-[9px] font-mono uppercase text-slate-400 font-bold">Speed</div>
-            <div className="text-base sm:text-lg font-black text-amber-300 font-mono">
-              {speedMph} <span className="text-[10px] text-slate-400">MPH</span>
-            </div>
-          </div>
-
-          {/* Time of Day */}
-          <div className="hidden sm:flex items-center gap-1 bg-slate-950/90 p-1 rounded-2xl border border-slate-800">
-            <button
-              onClick={() => setTimeOfDay('sunny')}
-              className={`p-2 rounded-xl text-xs transition-all cursor-pointer ${
-                timeOfDay === 'sunny' ? 'bg-amber-400 text-slate-950 font-black' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Sun className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setTimeOfDay('sunset')}
-              className={`p-2 rounded-xl text-xs transition-all cursor-pointer ${
-                timeOfDay === 'sunset' ? 'bg-orange-500 text-white font-black' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Sunset className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setTimeOfDay('night')}
-              className={`p-2 rounded-xl text-xs transition-all cursor-pointer ${
-                timeOfDay === 'night' ? 'bg-indigo-600 text-white font-black' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Moon className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Instant Skip Button */}
-          {canSkip && (
-            <button
-              onClick={onArrival}
-              title="Skip Ride Directly to Schoolyard Gameplay"
-              className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-300 hover:to-orange-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-xl flex items-center gap-2 transition-all cursor-pointer active:scale-95"
-            >
-              <span>Skip Ride</span>
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          )}
-        </div>
+        {canSkip && <button onClick={onArrival} className="pointer-events-auto flex items-center gap-2 rounded-xl bg-amber-200 px-4 py-3 font-bold text-neutral-950 hover:bg-amber-100">
+          Skip <ArrowRight size={18} />
+        </button>}
       </div>
-
-      {/* Autonomous Chauffeur Controls Dock */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 pointer-events-auto flex items-center gap-2 sm:gap-3 z-30">
-        <div className="px-4 py-2.5 rounded-2xl bg-slate-900/90 border border-amber-400/40 text-amber-300 font-mono text-xs font-black uppercase shadow-2xl flex items-center gap-2 backdrop-blur-md">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-          <span>AUTONOMOUS TRANSIT • ARRIVING AT SCHOOL</span>
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-4 pt-12 sm:px-6">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <button onClick={activateTurbo} aria-pressed={isTurboActive} className="rounded-lg bg-neutral-950/80 p-2 text-amber-200" aria-label="Boost"><Zap size={19} /></button>
+          <button onClick={honkHorn} className="rounded-lg bg-neutral-950/80 p-2 text-neutral-200" aria-label="Horn"><Volume1 size={19} /></button>
+<span className="ml-auto text-sm text-stone-200">{timeOfDay==='sunny'?'Local daylight':timeOfDay==='sunset'?'Local twilight':'Local night'}</span>
         </div>
-
-        {/* Turbo Boost */}
-        <button
-          onClick={activateTurbo}
-          className={`px-5 py-2.5 rounded-2xl font-black text-xs uppercase tracking-wider shadow-2xl active:scale-95 cursor-pointer flex items-center gap-2 transition-all ${
-            isTurboActive
-              ? 'bg-cyan-400 text-slate-950 scale-105 ring-4 ring-cyan-300'
-              : 'bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950 hover:brightness-110'
-          }`}
-        >
-          <Zap className="w-4 h-4 fill-current" />
-          <span>{isTurboActive ? 'BOOSTING!' : 'Turbo Boost'}</span>
-        </button>
-
-        {/* Horn */}
-        <button
-          onClick={honkHorn}
-          className="p-2.5 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border-2 border-slate-700 text-amber-300 font-black shadow-2xl active:scale-95 cursor-pointer"
-          title="Honk Car Horn"
-        >
-          <Volume1 className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Scrubber Progress Bar */}
-      <div className="absolute bottom-2 left-6 right-6 pointer-events-none z-20">
-        <div className="w-full h-1.5 bg-slate-900/80 rounded-full overflow-hidden border border-slate-800">
-          <div
-            className="h-full bg-amber-400 rounded-full transition-all duration-75"
-            style={{ width: `${(currentDriveTime / TOTAL_DRIVE_SECONDS) * 100}%` }}
-          />
+        <div className="h-1 overflow-hidden rounded-full bg-white/20" role="progressbar" aria-label="Travel progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(currentDriveTime / TOTAL_DRIVE_SECONDS * 100)}>
+          <div className="h-full bg-amber-200" style={{ width: `${Math.min(100, currentDriveTime / TOTAL_DRIVE_SECONDS * 100)}%` }} />
         </div>
       </div>
     </div>

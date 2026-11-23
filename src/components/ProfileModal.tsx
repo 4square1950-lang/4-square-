@@ -1,747 +1,396 @@
-import React, { useState } from 'react';
-import {
-  X,
-  User,
-  Trophy,
-  Award,
-  Zap,
-  Shield,
-  Activity,
-  Users,
-  Search,
-  UserPlus,
-  Play,
-  Trash2,
-  Share2,
-  Sparkles,
-  ChevronRight,
-  TrendingUp,
-  Check,
-  Flame,
-  Radio,
-  Clock,
-  Swords,
-  Target,
-} from 'lucide-react';
-import { CharacterDef, CharacterCustomization, CHARACTERS } from '../utils/characters';
-import { CampaignProgress } from '../types/campaign';
-import { soundFX } from '../services/soundEffects';
-import { FriendUser, ActivityItem, AchievementBadge } from '../types/profile';
-import { INITIAL_FRIENDS, MOCK_ACTIVITY_FEED, INITIAL_ACHIEVEMENTS, getProfileStats } from '../utils/profileData';
+import { trainingTotals, TRAINING_DRILLS } from '../services/training';
+import { downloadMedia, exportClip, IMAGE_LIMIT, VIDEO_SECONDS_LIMIT } from '../services/profileMedia';
+import { MASCOTS, MASCOT_NAMES } from '../services/profileExtras';
+import { campusCollectibles, ITEM_RARITIES } from '../services/collectibles';
+import { Trophy, Wallet, X, ChevronDown, ShoppingBag, ArrowLeft, Medal, GraduationCap, MapPin, Crown, Lock } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Pencil, Send, MoreHorizontal, User, UserPlus, UserMinus, Users, Check, XCircle, Clock } from 'lucide-react';
+import { ProfileMessages } from './ProfileMessages';
+import { CHARACTERS, type CharacterDef, type CharacterCustomization } from '../utils/characters';
+import type { CampaignProgress } from '../types/campaign';
+import { leagueTier, type LeagueProfile, type PublicProfile, type FriendRequestAction } from '../services/leagueTypes';
+import { preparePlayerSession, loadMarket } from '../services/marketClient';
+import type { MarketView } from '../services/marketTypes';
+import { profileLevel, type ConnectionView, type ProfileEdit } from '../services/profileProgress';
+import { getMatchHistory } from '../services/matchHistory';
+import { loadReplayVideo } from '../services/replayVideo';
+import { CharacterLineup } from './CharacterLineup';
+import { renderCardPortrait } from '../utils/cardPortrait';
+import { ThreeCourtScene } from './ThreeCourtScene';
+import { createInitialState } from '../services/foursquareEngine';
+import { VENUES } from '../utils/venueData';
 
-export interface SavedReplay {
-  id: string;
-  title: string;
-  date?: string;
-  durationSeconds: number;
-  winnerName?: string;
-  myScore?: number;
-  opponentScore?: number;
-  venueName: string;
-  opponentName?: string;
-  timestamp?: number | string;
+export interface SavedReplay { id:string; title:string; durationSeconds:number; venueName:string; timestamp?:number|string; video?:boolean; image?:boolean; highlight?:number }
+interface Props {
+  isOpen:boolean; onClose:()=>void; equippedCharacter:CharacterDef; customization:CharacterCustomization;
+  campaignProgress:CampaignProgress; savedReplays:SavedReplay[]; onDeleteReplay:(id:string)=>void; onRenameReplay:(id:string,title:string)=>void;
+  onOpenCustomizer:()=>void; onSaveAppearance:(appearance:CharacterCustomization)=>void; onCampaign:()=>void;
+  onCredits:()=>void; onMarket:()=>void;
 }
 
-interface ProfileModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  equippedCharacter: CharacterDef;
-  customization: CharacterCustomization;
-  campaignProgress: CampaignProgress;
-  savedReplays: SavedReplay[];
-  onDeleteReplay: (id: string) => void;
-  onOpenCustomizer: () => void;
-  onChallengeFriend?: (characterId: string) => void;
-}
-
-type ProfileTab = 'stats' | 'friends' | 'rankings' | 'trophies' | 'replays';
-
-export const ProfileModal: React.FC<ProfileModalProps> = ({
-  isOpen,
-  onClose,
-  equippedCharacter,
-  customization,
-  campaignProgress,
-  savedReplays,
-  onDeleteReplay,
-  onOpenCustomizer,
-  onChallengeFriend,
-}) => {
-  const [activeTab, setActiveTab] = useState<ProfileTab>('stats');
-  const [friendsList, setFriendsList] = useState<FriendUser[]>(INITIAL_FRIENDS);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [copiedShare, setCopiedShare] = useState(false);
-
-  if (!isOpen) return null;
-
-  const stats = getProfileStats(campaignProgress);
-  const playerName = customization.playerNickname || equippedCharacter.name || 'Patch';
-  const playerAvatar = equippedCharacter.name?.includes('Wolf')
-    ? '🐺'
-    : equippedCharacter.name?.includes('Slime')
-    ? '🟢'
-    : equippedCharacter.name?.includes('Roxy')
-    ? '🛼'
-    : '👦';
-
-  // Toggle follow status
-  const handleToggleFollow = (friendId: string) => {
-    soundFX.playClick();
-    setFriendsList((prev) =>
-      prev.map((f) => (f.id === friendId ? { ...f, isFollowing: !f.isFollowing } : f))
-    );
-  };
-
-  // Share profile card
-  const handleShareProfile = () => {
-    soundFX.playClick();
-    setCopiedShare(true);
-    setTimeout(() => setCopiedShare(false), 2500);
-  };
-
-  // Calculate total saved replay duration (1-hour limit = 3600 seconds)
-  const totalReplaySec = savedReplays.reduce((acc, r) => acc + r.durationSeconds, 0);
-  const totalReplayMin = Math.floor(totalReplaySec / 60);
-  const maxReplayMin = 60; // 1-hour limit
-
-  // Filtered friends
-  const filteredFriends = friendsList.filter((f) =>
-    f.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    f.nickname.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  return (
-    <div className="fixed inset-0 z-50 w-screen h-screen bg-slate-950 flex flex-col font-sans select-none overflow-hidden text-white animate-in fade-in duration-200">
-      {/* ========================================================================= */}
-      {/* FULL-SCREEN HERO HEADER: PROFILE & INSTAGRAM-STYLE STATS ROW */}
-      {/* ========================================================================= */}
-      <div className="relative bg-linear-to-r from-slate-950 via-blue-950/80 to-slate-950 p-6 sm:p-8 border-b border-slate-800 shrink-0">
-        <div className="absolute inset-0 bg-radial from-blue-600/20 via-transparent to-transparent pointer-events-none" />
-
-        <div className="relative z-10 max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
-          {/* Left: Avatar & Identity */}
-          <div className="flex items-center gap-5 text-center md:text-left">
-            <div className="relative">
-              <div
-                className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl flex items-center justify-center text-4xl sm:text-5xl shadow-2xl border-4 border-amber-400"
-                style={{ backgroundColor: equippedCharacter.avatarColor || '#2563eb' }}
-              >
-                {playerAvatar}
-              </div>
-              <div className="absolute -bottom-2 -right-2 px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 font-mono text-[10px] font-black uppercase shadow border border-slate-950">
-                LVL 14
-              </div>
-            </div>
-
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 flex-wrap justify-center md:justify-start">
-                <h1 className="text-3xl sm:text-4xl font-black italic tracking-tight uppercase text-white drop-shadow">
-                  PROFILE
-                </h1>
-                <span className="text-xs font-mono font-black px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/50">
-                  OAKRIDGE KING #1
-                </span>
-              </div>
-
-              <div className="text-xs text-slate-300 font-mono font-medium flex items-center gap-3 justify-center md:justify-start">
-                <span>Athlete: <strong className="text-amber-300">{playerName}</strong></span>
-                <span>•</span>
-                <span>Division: <strong className="text-cyan-300">Oakridge Squad</strong></span>
-              </div>
-
-              {/* XP Progress Bar */}
-              <div className="pt-1.5 w-64 max-w-full">
-                <div className="flex justify-between text-[10px] font-mono font-bold text-slate-400 mb-1">
-                  <span>Level XP Progress</span>
-                  <span className="text-amber-300">3,450 / 4,000 XP</span>
-                </div>
-                <div className="w-full h-2 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
-                  <div className="h-full bg-linear-to-r from-amber-400 to-amber-500 rounded-full w-[86%]" />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Center: Instagram-Style Posts / Followers / Following Header Row (Matching uploaded screenshot!) */}
-          <div className="flex items-center gap-8 sm:gap-12 bg-slate-950/80 backdrop-blur-md px-6 py-3 rounded-2xl border border-slate-800 shadow-2xl">
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                setActiveTab('stats');
-              }}
-              className="flex flex-col items-center cursor-pointer hover:scale-105 transition-transform"
-            >
-              <span className="text-xl sm:text-2xl font-black text-white tracking-tight font-mono">
-                3,022
-              </span>
-              <span className="text-xs text-slate-400 font-medium font-sans">
-                Matches
-              </span>
-            </button>
-
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                setActiveTab('friends');
-              }}
-              className="flex flex-col items-center cursor-pointer hover:scale-105 transition-transform"
-            >
-              <span className="text-xl sm:text-2xl font-black text-white tracking-tight font-mono">
-                67.6K
-              </span>
-              <span className="text-xs text-slate-400 font-medium font-sans">
-                Followers
-              </span>
-            </button>
-
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                setActiveTab('friends');
-              }}
-              className="flex flex-col items-center cursor-pointer hover:scale-105 transition-transform"
-            >
-              <span className="text-xl sm:text-2xl font-black text-white tracking-tight font-mono">
-                2,454
-              </span>
-              <span className="text-xs text-slate-400 font-medium font-sans">
-                Following
-              </span>
-            </button>
-          </div>
-
-          {/* Right: Quick Action Controls */}
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                onOpenCustomizer();
-              }}
-              className="px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-black text-xs uppercase tracking-wider shadow border border-slate-700 hover:border-amber-400 transition-all cursor-pointer flex items-center gap-2"
-            >
-              <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>Customize</span>
-            </button>
-
-            <button
-              onClick={handleShareProfile}
-              className="px-4 py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase tracking-wider shadow-lg shadow-blue-600/30 transition-all cursor-pointer flex items-center gap-2 border border-blue-400/40"
-            >
-              <Share2 className="w-4 h-4" />
-              <span>{copiedShare ? 'Copied Card!' : 'Share Profile'}</span>
-            </button>
-
-            <button
-              onClick={() => {
-                soundFX.playClick();
-                onClose();
-              }}
-              className="p-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all cursor-pointer border border-slate-700"
-              title="Exit Profile"
-            >
-              <X className="w-6 h-6" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-        {/* ========================================================================= */}
-        {/* PROFILE TAB NAVIGATION BAR */}
-        {/* ========================================================================= */}
-        <div className="flex items-center gap-2 px-6 pt-3 border-b border-slate-800 bg-slate-950/70 overflow-x-auto scrollbar-none">
-          {[
-            { id: 'stats', label: 'Career Statistics', icon: Activity },
-            { id: 'friends', label: 'Friends & Social', icon: Users, badge: `${friendsList.length}` },
-            { id: 'rankings', label: 'Circuit Rankings', icon: Trophy },
-            { id: 'trophies', label: 'Trophy Case', icon: Award },
-            { id: 'replays', label: 'Replay Theater', icon: Play, badge: `${savedReplays.length}` },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => {
-                  soundFX.playClick();
-                  setActiveTab(tab.id as ProfileTab);
-                }}
-                className={`relative px-4 py-3 rounded-t-2xl font-black text-xs uppercase tracking-wider transition-all cursor-pointer flex items-center gap-2 shrink-0 ${
-                  isActive
-                    ? 'text-amber-300 bg-slate-900 border-t-2 border-x border-slate-800 border-t-amber-400 shadow-md'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-amber-400' : 'text-slate-400'}`} />
-                <span>{tab.label}</span>
-                {tab.badge && (
-                  <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-                    isActive ? 'bg-amber-400/20 text-amber-300 border border-amber-400/40' : 'bg-slate-800 text-slate-400'
-                  }`}>
-                    {tab.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* ========================================================================= */}
-        {/* TAB CONTENT BODY */}
-        {/* ========================================================================= */}
-        <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-6 scrollbar-thin scrollbar-thumb-slate-800 bg-slate-900">
-          
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 1: CAREER STATISTICS DASHBOARD */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'stats' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              {/* Top Stat Overview Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 shadow-lg space-y-1">
-                  <div className="text-[11px] font-mono font-bold text-slate-400 uppercase">WIN / LOSS RECORD</div>
-                  <div className="text-2xl font-black text-white">{stats.matchesWon}W - {stats.matchesLost}L</div>
-                  <div className="text-xs font-mono font-bold text-emerald-400">{stats.winRatePct}% Win Rate</div>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 shadow-lg space-y-1">
-                  <div className="text-[11px] font-mono font-bold text-slate-400 uppercase">CROWN HOLDS</div>
-                  <div className="text-2xl font-black text-amber-300">{stats.totalCrownHolds} Holds</div>
-                  <div className="text-xs font-mono font-bold text-slate-400">Best Streak: {stats.longestCrownStreak}</div>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 shadow-lg space-y-1">
-                  <div className="text-[11px] font-mono font-bold text-slate-400 uppercase">PEAK SMASH SPEED</div>
-                  <div className="text-2xl font-black text-cyan-300">{stats.peakSmashSpeedMph} MPH</div>
-                  <div className="text-xs font-mono font-bold text-cyan-400">Fast Corner Spike</div>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 shadow-lg space-y-1">
-                  <div className="text-[11px] font-mono font-bold text-slate-400 uppercase">SHOT ACCURACY</div>
-                  <div className="text-2xl font-black text-indigo-300">{stats.shotAccuracyPct}%</div>
-                  <div className="text-xs font-mono font-bold text-indigo-400">{stats.totalHits} Total Hits</div>
-                </div>
-              </div>
-
-              {/* Detailed Performance Analytics */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="p-6 rounded-2xl bg-slate-950/60 border border-slate-800/90 space-y-4">
-                  <h3 className="text-xs font-black tracking-wider text-amber-400 uppercase flex items-center gap-2">
-                    <Target className="w-4 h-4" />
-                    <span>CAREER ACCURACY & CORNER SHOTS</span>
-                  </h3>
-
-                  <div className="space-y-3 font-mono text-xs">
-                    <div className="flex justify-between items-center py-2 border-b border-slate-800/60">
-                      <span className="text-slate-400">Total Career Points Scored</span>
-                      <span className="font-bold text-white text-sm">{stats.totalPointsScored} PTS</span>
-                    </div>
-
-                    <div className="flex justify-between items-center py-2 border-b border-slate-800/60">
-                      <span className="text-slate-400">Opponents Eliminated</span>
-                      <span className="font-bold text-rose-400 text-sm">{stats.totalEliminations} KO</span>
-                    </div>
-
-                    <div className="flex justify-between items-center py-2 border-b border-slate-800/60">
-                      <span className="text-slate-400">Receiver Faults Saved</span>
-                      <span className="font-bold text-emerald-400 text-sm">{stats.receiverFaultsSaved} Saved</span>
-                    </div>
-
-                    <div className="flex justify-between items-center py-2">
-                      <span className="text-slate-400">Average Rally Hits / Point</span>
-                      <span className="font-bold text-amber-300 text-sm">{stats.averageRallyHits} Hits</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-6 rounded-2xl bg-slate-950/60 border border-slate-800/90 space-y-4">
-                  <h3 className="text-xs font-black tracking-wider text-blue-400 uppercase flex items-center gap-2">
-                    <Flame className="w-4 h-4" />
-                    <span>ATHLETE PLAYSTYLE PROFICIENCY</span>
-                  </h3>
-
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-xs font-mono mb-1">
-                        <span className="text-slate-300 font-bold">Fast Corner Spikes</span>
-                        <span className="text-amber-300 font-bold">95%</span>
-                      </div>
-                      <div className="w-full h-2 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
-                        <div className="h-full bg-amber-400 rounded-full w-[95%]" />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between text-xs font-mono mb-1">
-                        <span className="text-slate-300 font-bold">Volley Returns (In-Flight)</span>
-                        <span className="text-cyan-300 font-bold">88%</span>
-                      </div>
-                      <div className="w-full h-2 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
-                        <div className="h-full bg-cyan-400 rounded-full w-[88%]" />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between text-xs font-mono mb-1">
-                        <span className="text-slate-300 font-bold">Line Defense & Receiver Grace</span>
-                        <span className="text-indigo-300 font-bold">92%</span>
-                      </div>
-                      <div className="w-full h-2 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
-                        <div className="h-full bg-indigo-400 rounded-full w-[92%]" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 2: FRIENDS & SOCIAL HUB */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'friends' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              {/* Search & Add Friend Header Bar */}
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-950/70 p-4 rounded-2xl border border-slate-800 relative z-30">
-                <div className="relative w-full sm:w-80">
-                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search friends, followers, or contenders..."
-                    className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-900 border border-slate-700/80 text-xs text-slate-200 placeholder-slate-400 focus:outline-none focus:border-amber-400/80 transition-colors"
-                  />
-                  {searchQuery && (
-                    <button
-                      onClick={() => setSearchQuery('')}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-mono text-slate-400 hover:text-white"
-                    >
-                      Clear
-                    </button>
-                  )}
-
-                  {/* Real-time Search Dropdown Menu */}
-                  {searchQuery.trim().length > 0 && (
-                    <div className="absolute top-full left-0 right-0 mt-2 bg-slate-950/95 backdrop-blur-md border border-slate-700 rounded-2xl shadow-2xl p-2 z-50 max-h-72 overflow-y-auto space-y-1 divide-y divide-slate-800/60 animate-in fade-in duration-150">
-                      <div className="px-3 py-1.5 text-[10px] font-mono font-bold text-slate-400 uppercase flex justify-between items-center">
-                        <span>SEARCH RESULTS ({filteredFriends.length})</span>
-                        <span className="text-amber-400">INSTAGRAM SEARCH</span>
-                      </div>
-                      {filteredFriends.length === 0 ? (
-                        <div className="p-4 text-center text-xs text-slate-400 font-mono">
-                          No players found matching "{searchQuery}"
-                        </div>
-                      ) : (
-                        filteredFriends.map((f) => (
-                          <div key={f.id} className="p-2 rounded-xl hover:bg-slate-900 flex items-center justify-between gap-3 transition-colors">
-                            <div className="flex items-center gap-2.5">
-                              <div className="w-9 h-9 rounded-lg flex items-center justify-center text-lg shadow border border-white/10" style={{ backgroundColor: f.avatarColor }}>
-                                {f.avatarEmoji}
-                              </div>
-                              <div>
-                                <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                                  <span>{f.name}</span>
-                                  <span className="text-[10px] font-mono text-slate-400">({f.nickname})</span>
-                                </div>
-                                <div className="text-[10px] font-mono text-amber-300">
-                                  {f.division} • Rank #{f.rank}
-                                </div>
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => {
-                                handleToggleFollow(f.id);
-                              }}
-                              className={`px-3 py-1 rounded-lg font-mono text-[10px] font-bold uppercase transition-all cursor-pointer ${
-                                f.isFollowing
-                                  ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                                  : 'bg-blue-600 text-white hover:bg-blue-500'
-                              }`}
-                            >
-                              {f.isFollowing ? 'Following' : '+ Follow'}
-                            </button>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-3 text-xs font-mono text-slate-300">
-                  <span>Following: <strong className="text-amber-300 font-black">{friendsList.filter((f) => f.isFollowing).length}</strong></span>
-                  <span>•</span>
-                  <span>Followers: <strong className="text-cyan-300 font-black">67.6K</strong></span>
-                </div>
-              </div>
-
-              {/* Friends List Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filteredFriends.map((friend) => (
-                  <div
-                    key={friend.id}
-                    className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 hover:border-slate-700 shadow-xl flex items-center justify-between gap-4 transition-all"
-                  >
-                    {/* Left: Friend Avatar & Info */}
-                    <div className="flex items-center gap-3.5">
-                      <div className="relative">
-                        <div
-                          className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl shadow border border-white/20"
-                          style={{ backgroundColor: friend.avatarColor }}
-                        >
-                          {friend.avatarEmoji}
-                        </div>
-                        {/* Live Status Indicator */}
-                        <span
-                          className={`absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-slate-950 ${
-                            friend.status === 'online'
-                              ? 'bg-emerald-400'
-                              : friend.status === 'in_match'
-                              ? 'bg-amber-400 animate-pulse'
-                              : 'bg-slate-600'
-                          }`}
-                          title={`Status: ${friend.status}`}
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h4 className="font-black text-sm text-white">{friend.name}</h4>
-                          <span className="text-[10px] font-mono text-slate-400">({friend.nickname})</span>
-                        </div>
-                        <div className="text-[11px] text-slate-400 font-mono">
-                          {friend.division} • Rank #{friend.rank}
-                        </div>
-                        <div className="text-[10px] font-mono text-amber-300 font-bold mt-0.5">
-                          {friend.crownHolds} Crown Holds • {friend.winRate} Win Rate
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Right: Challenge Button & Follow Toggle */}
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => {
-                          soundFX.playClick();
-                          if (onChallengeFriend) onChallengeFriend(friend.characterId);
-                          onClose();
-                        }}
-                        className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase shadow cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"
-                        title="Challenge this classmate directly to a 4-Square match"
-                      >
-                        <Swords className="w-3.5 h-3.5" />
-                        <span>Challenge</span>
-                      </button>
-
-                      <button
-                        onClick={() => handleToggleFollow(friend.id)}
-                        className={`p-2 rounded-xl border font-bold text-xs transition-all cursor-pointer ${
-                          friend.isFollowing
-                            ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-red-400 hover:border-red-500/50'
-                            : 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500'
-                        }`}
-                        title={friend.isFollowing ? 'Unfollow Friend' : 'Follow Friend'}
-                      >
-                        {friend.isFollowing ? 'Following' : 'Follow'}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Live Activity Feed */}
-              <div className="p-6 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-4">
-                <h3 className="text-xs font-black tracking-wider text-indigo-400 uppercase flex items-center gap-2">
-                  <Activity className="w-4 h-4" />
-                  <span>LIVE FRIENDS ACTIVITY FEED</span>
-                </h3>
-
-                <div className="space-y-3 divide-y divide-slate-800/60">
-                  {MOCK_ACTIVITY_FEED.map((act) => (
-                    <div key={act.id} className="pt-3 flex items-start gap-3">
-                      <span className="text-xl p-1 bg-slate-900 rounded-lg">{act.avatarEmoji}</span>
-                      <div className="flex-1 text-xs">
-                        <span className="font-black text-white">{act.friendName}</span>{' '}
-                        <span className="text-slate-300">{act.actionText}</span>
-                        <div className="text-[10px] font-mono text-slate-500 mt-0.5">{act.timestamp}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 3: CIRCUIT RANKINGS & STANDINGS */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'rankings' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              <div className="p-6 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-4">
-                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-                  <div>
-                    <h3 className="text-lg font-black text-white">Oakridge Division Circuit Ranking</h3>
-                    <p className="text-xs text-slate-400">Current season overall contender standings.</p>
-                  </div>
-                  <div className="px-4 py-2 rounded-xl bg-amber-400/20 text-amber-300 border border-amber-400/40 text-xs font-mono font-black">
-                    RANK #1 IN DIVISION
-                  </div>
-                </div>
-
-                <div className="space-y-3 pt-2 font-mono text-xs">
-                  <div className="flex justify-between items-center py-2.5 px-4 rounded-xl bg-amber-400/10 border border-amber-400/30">
-                    <div className="flex items-center gap-3">
-                      <span className="font-black text-amber-300 text-sm">1.</span>
-                      <span className="text-2xl">👦</span>
-                      <span className="font-black text-white">{playerName} (You)</span>
-                    </div>
-                    <span className="font-black text-amber-300">40 Crown Holds • 142 PTS</span>
-                  </div>
-
-                  <div className="flex justify-between items-center py-2.5 px-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="flex items-center gap-3">
-                      <span className="font-bold text-slate-400">2.</span>
-                      <span className="text-2xl">🟩</span>
-                      <span className="font-bold text-slate-200">Blocky</span>
-                    </div>
-                    <span className="font-bold text-slate-400">29 Crown Holds • 118 PTS</span>
-                  </div>
-
-                  <div className="flex justify-between items-center py-2.5 px-4 rounded-xl bg-slate-900 border border-slate-800">
-                    <div className="flex items-center gap-3">
-                      <span className="font-bold text-slate-400">3.</span>
-                      <span className="text-2xl">🛼</span>
-                      <span className="font-bold text-slate-200">Skater Roxy</span>
-                    </div>
-                    <span className="font-bold text-slate-400">28 Crown Holds • 112 PTS</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 4: TROPHY CASE & CAREER BADGES */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'trophies' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                {INITIAL_ACHIEVEMENTS.map((badge) => (
-                  <div
-                    key={badge.id}
-                    className={`p-5 rounded-2xl border transition-all ${
-                      badge.isUnlocked
-                        ? 'bg-slate-950/80 border-amber-500/50 shadow-lg'
-                        : 'bg-slate-950/40 border-slate-800/60 opacity-60'
-                    }`}
-                  >
-                    <div className="flex items-center gap-3.5 mb-3">
-                      <span className="text-3xl p-2 bg-slate-900 rounded-xl border border-slate-800">{badge.icon}</span>
-                      <div>
-                        <h4 className="font-black text-sm text-white">{badge.title}</h4>
-                        <span className="text-[10px] font-mono uppercase text-amber-400 font-bold">
-                          {badge.category}
-                        </span>
-                      </div>
-                    </div>
-
-                    <p className="text-xs text-slate-300 font-medium">{badge.description}</p>
-
-                    <div className="mt-3 pt-3 border-t border-slate-800/80 flex justify-between items-center text-[10px] font-mono">
-                      {badge.isUnlocked ? (
-                        <span className="text-emerald-400 font-bold flex items-center gap-1">
-                          <Check className="w-3 h-3" /> Unlocked {badge.unlockedAt}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400 font-bold">
-                          Progress: {badge.progress} / {badge.maxProgress}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* ------------------------------------------------------------- */}
-          {/* TAB 5: REPLAY THEATER (1-HOUR LIMIT) */}
-          {/* ------------------------------------------------------------- */}
-          {activeTab === 'replays' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              {/* Replay Storage Meter Header */}
-              <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-4 flex-wrap">
-                <div>
-                  <div className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-2">
-                    <Clock className="w-4 h-4 text-cyan-400" />
-                    <span>SAVED GAMEPLAY REPLAY STORAGE</span>
-                  </div>
-                  <div className="text-xs text-slate-400 mt-0.5">
-                    User limit: 1 hour (60 mins) of saved gameplay clips in athlete profile.
-                  </div>
-                </div>
-
-                <div className="font-mono text-xs font-bold text-cyan-300 bg-cyan-950/60 px-3.5 py-1.5 rounded-xl border border-cyan-500/40">
-                  {totalReplayMin} / {maxReplayMin} MINS USED
-                </div>
-              </div>
-
-              {/* Replays List */}
-              {savedReplays.length === 0 ? (
-                <div className="p-8 text-center bg-slate-950/40 rounded-2xl border border-slate-800 text-slate-400 space-y-2">
-                  <Play className="w-8 h-8 text-slate-600 mx-auto" />
-                  <p className="text-xs font-bold">No saved gameplay replays found.</p>
-                  <p className="text-[11px]">Use the Hamburger menu option "Record Game" during any match to save gameplay clips!</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {savedReplays.map((replay) => (
-                    <div
-                      key={replay.id}
-                      className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-4"
-                    >
-                      <div className="flex items-center gap-3.5">
-                        <div className="w-10 h-10 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/40 flex items-center justify-center font-black">
-                          <Play className="w-5 h-5 fill-current" />
-                        </div>
-
-                        <div>
-                          <h4 className="font-black text-sm text-white">{replay.title}</h4>
-                          <div className="text-xs text-slate-400 font-mono">
-                            {replay.venueName} • {replay.date} • {Math.round(replay.durationSeconds / 60)} mins
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => {
-                            soundFX.playClick();
-                            alert(`Playing recorded gameplay clip: ${replay.title}`);
-                          }}
-                          className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-xs uppercase shadow transition-all cursor-pointer"
-                        >
-                          Watch Replay
-                        </button>
-
-                        <button
-                          onClick={() => {
-                            soundFX.playClick();
-                            onDeleteReplay(replay.id);
-                          }}
-                          className="p-2 rounded-xl bg-slate-800 hover:bg-red-950 text-slate-400 hover:text-red-400 transition-all cursor-pointer"
-                          title="Delete Replay"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-      </div>
-    </div>
-  );
+const tabs = ['Stats','Items','Campaign','Marketplace','Recordings'] as const;
+const levels = ['friends','followers','following'] as const;
+const get = async <T,>(url:string, options?:RequestInit):Promise<T> => {
+  const response = await fetch(url,{ cache:'no-store',...options });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw Error(data.error || 'The request could not be completed.');
+  }
+  return response.json();
 };
+const send = (method:string, body:object) => ({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+const connectionNames = { friends:'Friends', followers:'Followers', following:'Following' };
+
+function ProfileBase({person,customization}:{person:PublicProfile;customization:CharacterCustomization}) {
+  const venue=VENUES[parseInt(person.key.slice(0,8),16)%VENUES.length];
+  const [game]=useState(()=>createInitialState(venue.defaultRuleSet));
+  const [position,setPosition]=useState<[number,number,number]>([0,0,9]);
+  return <div className="relative h-[min(68vh,36rem)] overflow-hidden rounded-lg bg-[#242e2b]">
+    <div className="pointer-events-none absolute left-3 top-3 z-40 rounded-lg bg-black/80 px-3 py-2 text-sm">WASD to explore · Drag to look</div>
+    <ThreeCourtScene mode="exploration" venue={venue} cameraView="third_person" customization={customization}
+      players={game.players} waitingQueue={game.waitingQueue} ballState={game.ballState} humanPlayerId={game.humanPlayerId}
+      activeTurnPlayerId={null} servingPlayerId={null} isHumanTurn={false} highlightedSquares={[]} onSelectTargetSquare={()=>{}}
+      explorationPlayerPos={position} onExplorationMove={setPosition}/>
+  </div>;
+}
+
+function ProfileActionButtons({person,busy,follow,request,visit,message}:{
+  person:PublicProfile; busy:boolean; follow:()=>void; request:(action:FriendRequestAction)=>void; visit:()=>void; message:()=>void;
+}) {
+  const friendship=person.friendship??'none';
+  return <div className="profile-person-actions" role="group" aria-label={'Profile actions for '+person.name}>
+    {friendship==='friends' ? <span><Users size={15}/> Friends</span>
+      : friendship==='sent' ? <button disabled={busy} onClick={()=>request('cancel')}><Clock size={15}/> Cancel friend request</button>
+      : friendship==='received' ? <>
+        <button disabled={busy} onClick={()=>request('accept')}><Check size={15}/> Accept friend request</button>
+        <button disabled={busy} onClick={()=>request('decline')}><XCircle size={15}/> Decline request</button>
+      </> : <button disabled={busy} onClick={()=>request('request')}><UserPlus size={15}/> Send friend request</button>}
+    <button disabled={busy} onClick={follow}>{person.followed?<UserMinus size={15}/>:<UserPlus size={15}/>} {person.followed?'Unfollow':'Follow'}</button>
+    <button onClick={visit}><User size={15}/> Visit profile</button>
+    <button onClick={message}><Send size={15}/> Send message</button>
+  </div>;
+}
+
+export function ProfileModal(props:Props) {
+  const [profile,setProfile] = useState<LeagueProfile>();
+  const [tab,setTab] = useState<typeof tabs[number]>('Stats');
+  const [editor,setEditor] = useState<ProfileEdit>();
+  const [busy,setBusy] = useState(false);
+  const [status,setStatus] = useState('');
+  const [directory,setDirectory] = useState<PublicProfile[]>();
+  const [requests,setRequests] = useState<PublicProfile[]>([]);
+  const [view,setView] = useState<ConnectionView>();
+  const [query,setQuery] = useState('');
+  const [menu,setMenu] = useState<string>();
+  const [visits,setVisits] = useState<{person:PublicProfile; base:boolean}[]>([]);
+  const visit=visits.at(-1);
+  const openVisit = (person:PublicProfile, base:boolean) => {
+    setMenu(undefined);
+    setVisits((history)=>history.at(-1)?.person.key===person.key && history.at(-1)?.base===base ? history : [...history,{person,base}]);
+  };
+  const closeProfile = () => {
+    setVisits([]);setEditor(undefined);setDirectory(undefined);setView(undefined);setMenu(undefined);setInbox(undefined);
+    props.onClose();
+  };
+  const back = () => {
+    if (visits.length) { setMenu(undefined);setVisits((history)=>history.slice(0,-1)); }
+    else closeProfile();
+  };
+  const [inbox,setInbox] = useState<{ recipient?: PublicProfile }>();
+  const [market,setMarket] = useState<MarketView>();
+  const [marketPortraits,setMarketPortraits] = useState<Record<string,string|undefined>>({});
+  const [filterMedia,setFilterMedia] = useState('');
+  const [mediaType,setMediaType] = useState('all');
+  const [oldest,setOldest] = useState(false);
+  const [activeMedia,setActiveMedia] = useState<SavedReplay>();
+  const [rename,setRename] = useState('');
+  const [clipStart,setClipStart] = useState(0);
+  const [clipEnd,setClipEnd] = useState(0);
+  const videoNode=useRef<HTMLVideoElement>(null);
+  const [video,setVideo] = useState<Blob>();
+  const [videoUrl,setVideoUrl] = useState('');
+  const avatar = useMemo(() => [props.equippedCharacter],[props.equippedCharacter]);
+  const [portrait,setPortrait]=useState<string>();
+  useEffect(()=>{if(props.isOpen)setPortrait(renderCardPortrait(props.equippedCharacter));},[props.isOpen,props.equippedCharacter]);
+  useEffect(() => {
+    if (!props.isOpen) return;
+    let active = true;
+    void preparePlayerSession().then(() => Promise.all([get<LeagueProfile>('/api/player/profile'),get<PublicProfile[]>('/api/player/friend-requests')]))
+      .then(([value,incoming]) => { if (active) {setProfile(value);setRequests(incoming);} })
+      .catch((error) => { if (active) setStatus(error.message); });
+    return () => { active=false; };
+  },[props.isOpen]);
+  useEffect(() => {
+    if (!props.isOpen || tab!=='Marketplace') return;
+    let active = true;
+    void preparePlayerSession().then(loadMarket).then((value)=>{if(active)setMarket(value);})
+      .catch((error)=>{if(active)setStatus(error.message);});
+    return ()=>{active=false;};
+  },[props.isOpen,tab]);
+  useEffect(() => {
+    if (!props.isOpen || tab !== 'Marketplace' || !market) return;
+    const ids=new Set(market.cards.slice(0,4).map(({characterId})=>characterId));
+    setMarketPortraits(Object.fromEntries(CHARACTERS.filter(({id})=>ids.has(id)).map((character)=>[character.id,renderCardPortrait(character)])));
+  },[market,props.isOpen,tab]);
+  useEffect(() => {
+    if (!video || tab!=='Recordings') { setVideoUrl(''); return; }
+    const source=URL.createObjectURL(video);setVideoUrl(source);
+    return ()=>URL.revokeObjectURL(source);
+  },[video,tab]);
+  if (!props.isOpen) return null;
+
+  const training = trainingTotals(props.campaignProgress.completedDrills);
+  const xp = training.xp + (profile?.xp ?? 0) + props.campaignProgress.completedVenues.length*750 + new Set(props.campaignProgress.lessonsCompleted ?? []).size*250;
+  const firstWin = (profile?.stats.wins ?? 0)>0 || getMatchHistory().some(({won})=>won) || props.campaignProgress.completedVenues.length>0;
+  const awards = [
+    {name:'First Win', Icon:Medal, earned:firstWin, summary:'Win a match.'},
+    {name:'Training Graduate', Icon:GraduationCap, earned:training.drills===TRAINING_DRILLS.length, summary:training.drills+' of '+TRAINING_DRILLS.length+' drills cleared'},
+    {name:'Road Win', Icon:MapPin, earned:props.campaignProgress.completedVenues.length>0, summary:'Win at a campaign venue.'},
+    {name:'Tournament Champion', Icon:Trophy, earned:(props.campaignProgress.tournamentTitles??0)>0, summary:(props.campaignProgress.tournamentTitles??0)>0?(props.campaignProgress.tournamentTitles+' '+(props.campaignProgress.tournamentTitles===1?'title':'titles')):'Win a tournament.'},
+    {name:'World Tour Champion', Icon:Crown, earned:props.campaignProgress.completedVenues.length===VENUES.length, summary:props.campaignProgress.completedVenues.length+' of '+VENUES.length+' venues won'},
+  ];
+  const level = profileLevel(xp);
+  const social = profile?.social;
+  const displayName = profile?.displayName || props.customization.playerNickname || 'Your profile';
+  const run = async (work:()=>Promise<void>) => {
+    setBusy(true);setStatus('');
+    try { await work(); }
+    catch(error) { setStatus(error instanceof Error ? error.message : 'The request could not be completed.'); }
+    finally { setBusy(false); }
+  };
+  const loadDirectory = async (type: ConnectionView, value='')=>{
+    const results = await Promise.all([
+      get<PublicProfile[]>('/api/player/directory?'+new URLSearchParams({view:type,q:value})),
+      type==='friends' ? get<PublicProfile[]>('/api/player/friend-requests') : Promise.resolve([]),
+    ]);
+    setDirectory(results[0]);if(type==='friends')setRequests(results[1]);
+  };
+  const fetchDirectory = (type:ConnectionView, value='') => {
+    setView(type);setMenu(undefined);setDirectory(undefined);
+    return run(()=>loadDirectory(type,value));
+  };
+  const saveProfile = (event:FormEvent) => {
+    event.preventDefault();
+    if (!editor) return;
+    void run(async () => {
+      const saved = await get<LeagueProfile>('/api/player/profile',send('PUT',editor));
+      setProfile(saved);
+      props.onSaveAppearance({...props.customization,playerNickname:saved.displayName});
+      setEditor(undefined);setStatus('Profile saved.');
+    });
+  };
+  const toInbox = (recipient?:PublicProfile) => {
+    setMenu(undefined);
+    setEditor(undefined);
+    setInbox({recipient});
+  };
+  const changeConnection = (person:PublicProfile, action:FriendRequestAction|'follow') => run(async()=>{
+    const isFollow=action==='follow';
+    const change=await get<{target:PublicProfile;self:PublicProfile}>(
+      isFollow?'/api/player/follow':'/api/player/friend-requests',
+      send('PUT',isFollow?{key:person.key,follow:!person.followed}:{key:person.key,action})
+    );
+    setProfile((previous)=>previous&&{...previous,social:change.self});
+    setVisits((previous)=>previous.map((entry)=>entry.person.key===person.key?{...entry,person:change.target}:entry));
+    setDirectory((previous)=>previous?.map((entry)=>entry.key===person.key?change.target:entry)
+      .filter((entry)=>entry.key!==person.key || view==='friends'&&entry.friendship==='friends' || view==='following'&&entry.followed || view==='followers'||view==='search'));
+    if(view==='friends')await loadDirectory('friends');
+    const result=isFollow?(change.target.followed?'Following ':'Unfollowed ')+change.target.name
+      : action==='decline'?'Friend request declined.'
+      : action==='cancel'?'Friend request canceled.'
+      : change.target.friendship==='friends'?'You and '+change.target.name+' are friends.':'Friend request sent to '+change.target.name+'.';
+    setStatus(result);
+  });
+  const actions=(person:PublicProfile, clearList=false)=><ProfileActionButtons person={person} busy={busy}
+    follow={()=>void changeConnection(person,'follow')} request={(action)=>void changeConnection(person,action)}
+    visit={()=>{openVisit(person,false);if(clearList)setDirectory(undefined);}}
+    message={()=>{toInbox(person);if(clearList)setDirectory(undefined);}}/>;
+
+  return <main className="profile-page" aria-label="Profile" onKeyDown={(event) => { if(event.key==='Escape') {if(editor)setEditor(undefined);else if(menu)setMenu(undefined);else if(inbox)setInbox(undefined);else back();} }}>
+    <div className="profile-page-inner">
+      <nav className="profile-history-nav" aria-label="Profile navigation">
+        <button className="profile-nav-red" aria-label="Back" onClick={back}><ArrowLeft size={19}/></button>
+        <button className="profile-nav-red profile-close-circle" aria-label="Close profile" onClick={closeProfile}><X size={19}/></button>
+      </nav>
+      {!visit && <header className="profile-cover field-panel">
+        <div className="profile-identity">
+          <div className="profile-avatar-wrap">
+          {social?.mascot !== undefined ? <div className="profile-portrait profile-mascot" aria-label={MASCOT_NAMES[social.mascot]}>{MASCOTS[social.mascot]}</div> : portrait?<img className="profile-portrait" src={portrait} alt=""/>:<div className="profile-portrait"/>}
+            <button className="profile-avatar-edit" aria-label="Edit profile" onClick={()=>setEditor({username:social?.username ?? '',displayName:displayName==='Your profile'?'':displayName,bio:social?.bio ?? '',mascot:social?.mascot,youtube:social?.youtube??''})}><Pencil size={17}/></button>
+          </div>
+          <div>
+            <h1 className="text-3xl font-black sm:text-4xl">{social?.username || displayName}</h1>
+            {social?.username && <p className="mt-1 text-base">{displayName}</p>}
+            <div className="profile-counts">{levels.map((entry)=><div className="profile-connection" key={entry}>
+              <button aria-expanded={view===entry && directory!==undefined} disabled={busy} onClick={()=>{
+                if (view===entry && directory!==undefined) {setDirectory(undefined);setView(undefined);}
+                else void fetchDirectory(entry);
+              }}><strong>{(social?.[entry] ?? 0).toLocaleString()}</strong><span>{connectionNames[entry]} <ChevronDown size={12}/>{entry==='friends' && requests.length>0 && <small className="profile-request-count">{requests.length} {requests.length===1?'request':'requests'}</small>}</span></button>
+              {view===entry && directory!==undefined && <div className="profile-connection-list field-panel">
+                {entry==='friends' && requests.length>0 && <section className="profile-incoming" aria-label="Friend requests">
+                  <h2>Friend requests</h2>
+                  {requests.map((person)=><div className="profile-person" key={person.key}><strong>{person.name}</strong>
+                    <button aria-label={'Actions for '+person.name} aria-expanded={menu===person.key} onClick={()=>setMenu(menu===person.key?undefined:person.key)}><MoreHorizontal size={16}/></button>
+                    {menu===person.key && actions(person,true)}
+                  </div>)}
+                </section>}
+                {!directory.length && <p className="p-2">No {connectionNames[entry].toLowerCase()} yet.</p>}
+                {directory.map((person)=><div key={person.key} className="profile-person" onContextMenu={(event)=>{event.preventDefault();setMenu(person.key);}}>
+                  <button onClick={()=>{openVisit(person,true);setDirectory(undefined);}}>{person.name}</button>
+                  <button aria-label={'Actions for '+person.name} aria-expanded={menu===person.key} onClick={()=>setMenu(menu===person.key?undefined:person.key)}><MoreHorizontal size={16}/></button>
+                  {menu===person.key && actions(person,true)}
+                </div>)}
+              </div>}
+            </div>)}</div>
+            {social?.youtube && <a className="inline-block text-sm text-amber-200" href={social.youtube} target="_blank" rel="noreferrer">YouTube channel ↗</a>}
+            {social?.bio && <p className="max-w-prose whitespace-pre-wrap text-stone-300">{social.bio}</p>}
+            <p className="mt-2 text-sm text-amber-200">Level {level.level} {profile ? ' · '+leagueTier(profile.elo)+' league' : ''}</p>
+          </div>
+          <div className="profile-actions flex gap-2">
+            <button className="message-square" aria-label="Messages" title="Messages" onClick={()=>toInbox()}><Send size={20}/></button>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {props.campaignProgress.victoryEdition && <button className="league-button" onClick={props.onCredits}>Credits & credibility</button>}
+        </div>
+      </header>}
+
+      {editor && <div className="league-overlay profile-edit-overlay" role="dialog" aria-modal="true" aria-label="Edit profile">
+        <form className="league-panel profile-editor theme-profile-editor" onSubmit={saveProfile}>
+          <div className="league-header"><h2>Edit profile</h2><button className="profile-nav-red profile-close-circle" type="button" aria-label="Close editor" onClick={()=>setEditor(undefined)}><X size={18}/></button></div>
+          <fieldset className="mascot-box"><legend>Profile mascot</legend>
+            {MASCOTS.map((icon,index)=><button type="button" key={icon} aria-label={MASCOT_NAMES[index]} aria-pressed={editor.mascot===index} onClick={()=>setEditor({...editor,mascot:index})}>{icon}</button>)}
+          </fieldset>
+          <label>Username <small>Change once every seven days</small><input required maxLength={64} value={editor.username} onChange={(event)=>setEditor({...editor,username:event.target.value})}/></label>
+          <label>Display name<input required maxLength={64} value={editor.displayName} onChange={(event)=>setEditor({...editor,displayName:event.target.value})}/></label>
+          <label>Bio <small>{editor.bio.length}/1,000</small><textarea className="profile-field" maxLength={1000} rows={4} value={editor.bio} onChange={(event)=>setEditor({...editor,bio:event.target.value})}/></label>
+          <label>YouTube channel<input placeholder="https://www.youtube.com/@channel" value={editor.youtube??''} maxLength={256} onChange={(event)=>setEditor({...editor,youtube:event.target.value})}/></label>
+          {status && <p role="status">{status}</p>}
+          <button className="league-primary" disabled={busy}>Save changes</button>
+        </form></div>}
+      {status && !editor && <p className="field-panel px-4 py-3" role="status">{status}</p>}
+
+      <form className="profile-editor field-panel flex flex-wrap items-end gap-2" onSubmit={(e)=>{e.preventDefault();void fetchDirectory('search',query);}}>
+        <label className="grid flex-1 gap-1">Search people<input placeholder="Display name or username" value={query} maxLength={64} onChange={(e)=>setQuery(e.target.value)}/></label>
+        <button className="league-button" disabled={busy}>Search</button>
+        <button type="button" className="league-button" onClick={()=>{setDirectory(undefined);setMenu(undefined);}}>Clear results</button>
+      </form>
+      {directory && view==='search' && <section className="field-panel profile-directory" aria-label="Player directory">
+        {!directory.length && <p className="p-4">No players in this view.</p>}
+        {directory.map((person)=><div className="profile-person" key={person.key}
+          onContextMenu={(e)=>{e.preventDefault();setMenu(person.key);}}>
+          <button className="grow text-left" onClick={()=>{setMenu(undefined);openVisit(person,true);}}><strong>{person.name}</strong>
+            <span className="ml-2 text-sm text-stone-300">{person.username?'@'+person.username:''} {person.npc?'· Test NPC':''}</span></button>
+          <button aria-label={'Actions for '+person.name} aria-expanded={menu===person.key} className="league-button" onClick={()=>setMenu(menu===person.key?undefined:person.key)}><MoreHorizontal size={17}/></button>
+          {menu===person.key && actions(person)}
+        </div>)}
+      </section>}
+      {visit && <section className="field-panel p-4">
+        <header className="mb-3 flex justify-between gap-2"><h2 className="text-xl font-bold">{visit.person.name}{visit.base?'’s base':''}</h2>
+          <div className="flex items-center gap-2"><button className="league-button" aria-label={'Actions for '+visit.person.name} aria-expanded={menu===visit.person.key} onClick={()=>setMenu(menu===visit.person.key?undefined:visit.person.key)}><MoreHorizontal size={17}/></button><button className="message-square" aria-label="Send a message" title="Send a message" onClick={()=>toInbox(visit.person)}><Send size={20}/></button></div>
+        </header>
+        {menu===visit.person.key && <div className="mb-3">{actions(visit.person)}</div>}
+        {visit.base ? <ProfileBase key={visit.person.key} person={visit.person} customization={props.customization}/>
+          : <><p>{visit.person.bio || 'Four Square player'}</p><p>{visit.person.elo} Elo · {visit.person.followers} followers</p><button className="league-button mt-2" onClick={()=>openVisit(visit.person,true)}>Visit base</button></>}
+      </section>}
+      {inbox && <ProfileMessages selfKey={social?.key} recipient={inbox.recipient} onClose={()=>setInbox(undefined)}/>}
+
+      {!visit && <section className="field-panel overflow-hidden" aria-label="Character preview">
+        <div className="profile-preview"><CharacterLineup characters={avatar} controlled={props.equippedCharacter.id} customization={props.customization} motion="idle"/></div>
+        <div className="flex items-center justify-between p-3"><span>{props.equippedCharacter.name}</span><button className="league-button" onClick={props.onOpenCustomizer}>Open Character Studio</button></div>
+      </section>}
+
+      {!visit && <><section className="field-panel overflow-hidden">
+        <nav className="league-tabs flex-wrap" aria-label="Profile views">{tabs.map((name)=><button key={name} className="league-button" aria-pressed={tab===name} onClick={()=>setTab(name)}>{name}</button>)}</nav>
+        {tab==='Stats' && <div className="profile-content">
+          <div className="profile-stats">{[['Elo',profile?.elo ?? '—'],['Online matches',profile?.stats.played ?? '—'],['Online wins',profile?.stats.wins ?? '—'],['Crown holds',profile?.stats.holds ?? '—'],['On this device',getMatchHistory().length],['Training drills',training.drills+'/'+TRAINING_DRILLS.length],['XP',xp]].map(([label,value])=><div key={label}><b>{value}</b><span>{label}</span></div>)}</div>
+          <section className="profile-trophies" aria-label="Trophy case">
+            <h3><Trophy size={19}/> Trophy case <small>{awards.filter(({earned})=>earned).length} / {awards.length} earned</small></h3>
+            <div className="trophy-grid">
+              {awards.map(({name,Icon,earned,summary})=><article key={name} data-earned={earned}>
+                <div className="trophy-emblem"><Icon size={25}/>{!earned && <Lock size={12} className="trophy-lock"/>}</div>
+                <div><h4>{name}</h4><p>{summary}</p><small>{earned?'Earned':'Locked'}</small></div>
+              </article>)}
+            </div>
+          </section>
+        </div>}
+        {tab==='Items' && <div className="profile-content collectible-gallery">
+          {ITEM_RARITIES.map((rarity,index)=>{
+            const all=VENUES.flatMap(({id})=>campusCollectibles(id)).filter((item)=>item.rarity===rarity);
+            const found=all.filter(({id})=>props.campaignProgress.collectibles?.includes(id));
+            return <section key={rarity} data-rarity={index}>
+              <h3>{rarity} <small>{found.length} collected</small></h3>
+              <div>{Array.from({length:Math.max(4,found.length)},(_,slot)=>found[slot] ?
+                <article key={found[slot].id}><span>{found[slot].icon}</span><strong>{found[slot].name}</strong></article> :
+                <article key={slot} aria-label="Undiscovered item"><span>◇</span><small>Undiscovered</small></article>)}</div>
+            </section>;
+          })}
+        </div>}
+        {tab==='Recordings' && <div className="profile-content">
+          <h3>Recordings and screenshots</h3>
+          <p className="text-sm text-stone-300">{props.savedReplays.filter((item)=>item.image).length} / {IMAGE_LIMIT.toLocaleString()} images · {Math.ceil(props.savedReplays.reduce((total,item)=>total+(item.video?item.durationSeconds:0),0)/60)} / {VIDEO_SECONDS_LIMIT/60} min video</p>
+          {social?.youtube && <a className="league-button" href="https://studio.youtube.com/" target="_blank" rel="noreferrer">Open YouTube Studio ↗</a>}
+          <input className="profile-field mt-3" aria-label="Filter recordings" placeholder="Filter recordings" value={filterMedia} onChange={(event)=>setFilterMedia(event.target.value)}/>
+          <div className="flex flex-wrap gap-2 py-2">
+            <label>Show <select className="profile-field" value={mediaType} onChange={(event)=>setMediaType(event.target.value)}>
+              <option value="all">All captures</option><option value="video">Videos</option><option value="image">Images</option>
+            </select></label>
+            <label>Order <select className="profile-field" value={oldest?'oldest':'newest'} onChange={(event)=>setOldest(event.target.value==='oldest')}>
+              <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+            </select></label>
+          </div>
+          {!props.savedReplays.length && <p>Use Screenshot or Record in the pause menu to save your first capture.</p>}
+          {videoUrl && activeMedia && <section className="field-panel my-3 grid gap-3 p-3">
+            {activeMedia.image ? <img className="profile-video" src={videoUrl} alt={activeMedia.title}/> : <>
+              <video ref={videoNode} src={videoUrl} className="profile-video" controls playsInline/>
+              <div className="flex flex-wrap items-end gap-2">
+                <label>From (s) <input className="profile-field w-20" type="number" min={0} max={activeMedia.durationSeconds} value={clipStart} onChange={(event)=>setClipStart(event.target.valueAsNumber || 0)}/></label>
+                <label>To (s) <input className="profile-field w-20" type="number" min={0} max={activeMedia.durationSeconds} value={clipEnd} onChange={(event)=>setClipEnd(event.target.valueAsNumber || 0)}/></label>
+                <button className="league-button" disabled={busy} onClick={()=>{
+                  const mark=activeMedia.highlight ?? Math.max(0,activeMedia.durationSeconds-6);
+                  setClipStart(Math.max(0,mark-5));setClipEnd(Math.min(mark+7,activeMedia.durationSeconds));
+                }}>Suggest highlight</button>
+                <button className="league-button" disabled={busy || clipEnd<=clipStart} onClick={()=>void run(async()=>{
+                  if(!videoNode.current) return;
+                  const result=await exportClip(videoNode.current,Math.max(0,clipStart),Math.min(clipEnd,activeMedia.durationSeconds));
+                  downloadMedia(result,activeMedia.title+'-clip.webm');
+                })}>Export clip</button>
+              </div>
+            </>}
+            <button className="league-button justify-self-start" onClick={()=>video && downloadMedia(video,activeMedia.title+(activeMedia.image?'.png':'.webm'))}>Download original</button>
+          </section>}
+          {(oldest?[...props.savedReplays].reverse():props.savedReplays).filter((item)=>(mediaType==='all'||(mediaType==='image'?item.image:item.video)) && (item.title+' '+item.venueName).toLowerCase().includes(filterMedia.toLowerCase())).map((item)=><div className="profile-replay" key={item.id}>
+            <div><strong>{item.title}</strong><p>{item.venueName} · {item.image?'Image':item.durationSeconds+'s'}</p></div>
+            {(item.video || item.image)&&<button className="league-button" onClick={()=>void run(async()=>{
+              const data=await loadReplayVideo(item.id);if(!data)throw Error('Recording unavailable.');
+              setActiveMedia(item);setVideo(data);setClipStart(0);setClipEnd(item.durationSeconds);setRename(item.title);
+            })}>{item.image?'View':'Open'}</button>}
+            {activeMedia?.id===item.id && <form className="flex gap-1" onSubmit={(event)=>{event.preventDefault();const title=rename.trim();if(title){props.onRenameReplay(item.id,title);setActiveMedia({...item,title});}}}>
+              <input aria-label="Capture title" className="profile-field w-35" value={rename} maxLength={80} onChange={(event)=>setRename(event.target.value)}/>
+              <button className="league-button">Rename</button>
+            </form>}
+            <button className="league-button" onClick={()=>{if(activeMedia?.id===item.id){setVideo(undefined);setActiveMedia(undefined);}props.onDeleteReplay(item.id);}}>Delete</button>
+          </div>)}
+        </div>}
+        {tab==='Campaign' && <div className="profile-content"><p>{props.campaignProgress.completedVenues.length} venues won · {props.campaignProgress.lessonsCompleted?.length ?? 0} lessons passed</p><button className="league-primary mt-2" onClick={props.onCampaign}>Open 3D campaign</button></div>}
+        {tab==='Marketplace' && <div className="profile-content">
+          <div className="market-profile-hero"><Wallet size={38}/><div><h3>Club wallet</h3><p>Your balances, collection, and trading activity</p></div><button className="league-primary" onClick={props.onMarket}><ShoppingBag size={17}/>Open auctions</button></div>
+          <div className="profile-stats"><div><b>{market?.coins ?? '—'}</b><span>{market?.test?'Test coins':'Online coins'}</span></div><div><b>{props.campaignProgress.coins}</b><span>Campaign coins</span></div><div><b>{market?.cards.length ?? '—'}</b><span>Cards</span></div></div>
+          {market && market.cards.length>0 && <section className="market-profile-collection">
+            <h3>Your cards</h3><div>{market.cards.slice(0,4).map((card)=>{
+              const character=CHARACTERS.find(({id})=>id===card.characterId);
+              return <article key={card.id}>
+                {marketPortraits[card.characterId] ? <img src={marketPortraits[card.characterId]} alt=""/> : <Trophy size={36}/>}
+                <strong>{character?.name ?? 'Player card'}</strong>{card.listed && <small>Listed</small>}
+              </article>;
+            })}</div>
+          </section>}
+          <h3 className="mt-4">Transactions</h3>
+          {market && !market.ledger.length&&<p>No transactions yet.</p>}
+          {market?.ledger.map(({ref,delta})=><p className="market-profile-transaction" key={ref}>{({ball:'Ball purchase',bundle:'Coin bundle',pack:'Pack purchase',match:'Match reward'} as Record<string,string>)[ref.split(':')[0]] ?? ref.split(':')[0].replace(/-/g,' ')} · {delta>0?'+':''}{delta} coins</p>)}
+        </div>}
+      </section>
+      <footer className="profile-xp field-panel"><span>Level {level.level}</span><progress value={level.current} max={level.required} aria-label="Progress to the next level"/><span>{level.current.toLocaleString()} / {level.required.toLocaleString()} XP</span></footer></>}
+    </div>
+  </main>;
+}

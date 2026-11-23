@@ -1,97 +1,50 @@
-import React, { useState } from 'react';
-import { X, MessageCircle, Sparkles, ChevronRight, HelpCircle } from 'lucide-react';
-import { CampaignNPC } from '../types/campaign';
-
-interface NPCDialogueModalProps {
-  npc: CampaignNPC | null;
-  onClose: () => void;
-  onChallengePractice?: () => void;
-}
-
-export const NPCDialogueModal: React.FC<NPCDialogueModalProps> = ({
-  npc,
-  onClose,
-  onChallengePractice,
-}) => {
-  const [lineIdx, setLineIdx] = useState(0);
-
+import { useCallback, useEffect, useState } from 'react';
+import { Volume2, VolumeX, X } from 'lucide-react';
+import type { CampaignNPC } from '../types/campaign';
+interface Props { npc: CampaignNPC | null; onClose: () => void; onChallengePractice?: () => void; }
+export function NPCDialogueModal({ npc, onClose, onChallengePractice }: Props) {
+  const [line, setLine] = useState(0);
+  const [muted, setMuted] = useState(() => localStorage.getItem('foursquare_npc_muted') === 'true');
+  const canSpeak = 'speechSynthesis' in window;
+  useEffect(() => setLine(0), [npc?.id]);
+  const speak = useCallback(() => {
+    const subtitle = npc?.dialogueLines[line];
+    if (!subtitle || muted || !canSpeak) return;
+    window.speechSynthesis.cancel();
+    const voiceLine = new SpeechSynthesisUtterance(subtitle.trim().replace(/^[“"]|[”"]$/g, ''));
+    const adult = /coach|teacher|instructor|referee/i.test(npc.role);
+    const variation = [...npc.id].reduce((sum, letter) => sum + letter.charCodeAt(0), 0);
+    const accents = window.speechSynthesis.getVoices().filter(({lang}) => lang.toLowerCase().startsWith('en'));
+    const preferred = accents.filter(({name}) => /natural|enhanced|premium|neural/i.test(name));
+    const voices = preferred.length ? preferred : accents.filter(({localService})=>localService);
+    const choices = [...(voices.length ? voices : accents)].sort((a, b) => a.name.localeCompare(b.name));
+    if (choices.length) voiceLine.voice = choices[variation % choices.length];
+    else voiceLine.lang='en-US';
+    voiceLine.pitch = adult ? .96 : 1 + (variation % 5) * .02;
+    voiceLine.rate = adult ? .91 : .94 + (variation % 5) * .022;
+    window.speechSynthesis.speak(voiceLine);
+  }, [canSpeak, npc, line, muted]);
+  useEffect(() => {
+    speak();
+    return () => { if (canSpeak) window.speechSynthesis.cancel(); };
+  }, [canSpeak, speak]);
   if (!npc) return null;
-
-  const currentLine = npc.dialogueLines[lineIdx] || npc.dialogueLines[0];
-  const hasMore = lineIdx < npc.dialogueLines.length - 1;
-
-  const handleNext = () => {
-    if (hasMore) {
-      setLineIdx((prev) => prev + 1);
-    } else {
-      onClose();
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:p-8 bg-slate-950/60 backdrop-blur-xs select-none animate-in fade-in duration-150">
-      <div className="bg-slate-900 border-2 border-amber-400 w-full max-w-2xl rounded-3xl shadow-2xl p-5 text-slate-100 flex flex-col gap-3">
-        {/* Speaker Name & Role */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-amber-400 text-slate-950 flex items-center justify-center font-black text-sm shadow">
-              {npc.name[0]}
-            </div>
-            <div>
-              <h3 className="font-black text-base text-white leading-none">{npc.name}</h3>
-              <span className="text-[11px] font-mono text-amber-400 font-bold">{npc.role}</span>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Dialogue Bubble */}
-        <div className="py-2 text-sm sm:text-base text-slate-100 leading-relaxed font-medium min-h-[56px]">
-          "{currentLine}"
-        </div>
-
-        {/* Pro Tip if available */}
-        {npc.tips && (
-          <div className="px-3 py-2 rounded-xl bg-amber-400/10 border border-amber-400/20 text-xs text-amber-300 flex items-center gap-2">
-            <Sparkles className="w-3.5 h-3.5 shrink-0" />
-            <span><strong>Court Tip:</strong> {npc.tips}</span>
-          </div>
-        )}
-
-        {/* Action Buttons: Challenge to Match & Dialogue Navigation */}
-        <div className="flex items-center justify-between pt-2 border-t border-slate-800 gap-2 flex-wrap">
-          <div className="text-[11px] font-mono text-slate-500">
-            Line {lineIdx + 1} of {npc.dialogueLines.length}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {onChallengePractice && (
-              <button
-                onClick={() => {
-                  onChallengePractice();
-                  onClose();
-                }}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white font-black text-xs uppercase tracking-wider transition-all cursor-pointer shadow-md hover:scale-105 active:scale-95"
-              >
-                <span>Play Four Square Match</span>
-              </button>
-            )}
-
-            <button
-              onClick={handleNext}
-              className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs uppercase tracking-wider transition-all cursor-pointer shadow active:scale-95"
-            >
-              <span>{hasMore ? 'Continue' : 'Got it'}</span>
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
+  const hasNext = line + 1 < npc.dialogueLines.length;
+  return <div className="fixed inset-0 z-50 grid items-end justify-items-center bg-black/50 p-4 sm:p-8">
+    <section className="field-panel w-full max-w-xl p-5 sm:p-6" role="dialog" aria-modal="true" aria-label={npc.name}>
+      <header className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold text-amber-200">{npc.role}</p><h2 className="text-xl font-bold">{npc.name}</h2></div><button onClick={onClose} aria-label="Close dialogue"><X size={20} /></button></header>
+      <p className="py-5 text-sm leading-relaxed text-stone-200">{npc.dialogueLines[line] ?? npc.dialogueLines[0]}</p>
+      <footer className="flex flex-wrap justify-end gap-2">
+        {canSpeak && <div className="mr-auto flex gap-2">
+          <button className="league-button" disabled={muted} onClick={speak} aria-label="Replay voice"><Volume2 size={16}/></button>
+          <button className="league-button" aria-pressed={muted} onClick={() => {
+            localStorage.setItem('foursquare_npc_muted', String(!muted));
+            setMuted(!muted);
+          }} aria-label={muted ? 'Unmute characters' : 'Mute characters'}>{muted ? <VolumeX size={16}/> : 'Mute'}</button>
+        </div>}
+        {npc.isOpponent && onChallengePractice && <button onClick={onChallengePractice} className="rounded-lg bg-amber-200 px-4 py-2 text-sm font-bold text-neutral-950">Challenge</button>}
+        <button onClick={() => hasNext ? setLine(line + 1) : onClose()} className="rounded-lg border border-white/15 px-4 py-2 text-sm">{hasNext ? 'Next' : 'Close'}</button>
+      </footer>
+    </section>
+  </div>;
+}

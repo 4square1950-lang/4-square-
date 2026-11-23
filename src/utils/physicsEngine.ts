@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { CAMPUS_LIMITS } from './campusLayout';
 
 export interface CylinderCollider {
   id: string;
@@ -8,6 +9,7 @@ export interface CylinderCollider {
   radius: number;
   height: number;
   isStatic: boolean;
+  y?:number;
 }
 
 export interface BoxCollider {
@@ -63,7 +65,8 @@ export class PhysicsEngine {
     personId: string,
     currentX: number,
     currentZ: number,
-    radius: number = 0.48
+    radius: number = 0.48,
+    elevation=0,
   ): [number, number] {
     let x = currentX;
     let z = currentZ;
@@ -73,6 +76,7 @@ export class PhysicsEngine {
     for (let iter = 0; iter < iterations; iter++) {
       // 1. Box Colliders (Walls, Benches, Cars, Steps, Gate Posts)
       for (const [, box] of this.boxColliders) {
+        if (box.maxY<=elevation+.09 || box.minY>=elevation+1.45) continue;
         // Find closest point on the rectangle [minX, maxX] x [minZ, maxZ] to circle center (x, z)
         const closestX = Math.max(box.minX, Math.min(box.maxX, x));
         const closestZ = Math.max(box.minZ, Math.min(box.maxZ, z));
@@ -115,6 +119,8 @@ export class PhysicsEngine {
       // 2. Cylinder Colliders (NPCs, Spectators, Referee, Poles, Trees)
       for (const [, other] of this.cylinderColliders) {
         if (other.id === personId) continue;
+        const y=other.y??0;
+        if(y+other.height<=elevation+.09 || y>=elevation+1.45)continue;
 
         const dx = x - other.x;
         const dz = z - other.z;
@@ -139,9 +145,8 @@ export class PhysicsEngine {
         }
       }
 
-      // Hard clamp inside campus perimeter boundaries (front Maple St z=-47 to backyard fence z=+22)
-      x = Math.max(-27.5, Math.min(27.5, x));
-      z = Math.max(-47.0, Math.min(22.0, z));
+      x = Math.max(CAMPUS_LIMITS.left, Math.min(CAMPUS_LIMITS.right, x));
+      z = Math.max(CAMPUS_LIMITS.front, Math.min(CAMPUS_LIMITS.rear, z));
     }
 
     // Update position in cylinder registry

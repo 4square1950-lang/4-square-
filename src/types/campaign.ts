@@ -76,7 +76,17 @@ export interface VenueDef {
   musicTrack: string;
 }
 
+export type TournamentStage = 'quarterfinals' | 'semifinals' | 'finals' | 'champion';
+export interface VictoryEdition {
+  winner: string;
+  event: 'Circuit' | 'Tournament';
+  venue: string;
+  date: string;
+}
+
 export interface CampaignProgress {
+  collectibles?: string[];
+  completedDrills?: string[];
   unlockedVenues: VenueId[];
   completedVenues: VenueId[];
   currentVenueId: VenueId;
@@ -96,6 +106,12 @@ export interface CampaignProgress {
   matchesWon?: number;
   playerLevel?: number;
   lessonsCompleted?: string[];
+  tournamentStage?: TournamentStage;
+  tournamentQualifiers?: string[][];
+  tournamentEliminated?: boolean;
+  tournamentCharacterId?: string;
+  tournamentTitles?: number;
+  victoryEdition?: VictoryEdition;
 }
 
 export interface ChatMessage {

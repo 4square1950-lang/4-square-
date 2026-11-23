@@ -328,8 +328,9 @@ export const ColorWheelPicker: React.FC<ColorWheelPickerProps> = ({
         </button>
       </div>
 
-      {/* Main Color Wheel and Controls */}
-      <div className="flex flex-col sm:flex-row items-center gap-4">
+      <details className="mt-2">
+        <summary className="cursor-pointer text-xs font-semibold text-stone-300">Advanced color</summary>
+      <div className="mt-3 flex flex-col sm:flex-row items-center gap-4">
         {/* Color Wheel Canvas */}
         <div className="relative shrink-0 flex items-center justify-center">
           <canvas
@@ -361,7 +362,7 @@ export const ColorWheelPicker: React.FC<ColorWheelPickerProps> = ({
           {/* Brightness / Luminance Slider */}
           <div>
             <div className="flex justify-between text-[11px] font-bold text-slate-400 mb-1">
-              <span>Luminance / Value</span>
+              <span>Brightness</span>
               <span className="font-mono text-slate-300">{Math.round(hsv.v * 100)}%</span>
             </div>
             <input
@@ -449,10 +450,11 @@ export const ColorWheelPicker: React.FC<ColorWheelPickerProps> = ({
         </div>
       </div>
 
+      </details>
       {/* Quick Swatches */}
       {presetSwatches && presetSwatches.length > 0 && (
         <div className="mt-3 pt-3 border-t border-slate-800">
-          <div className="text-[10px] font-bold text-slate-400 uppercase mb-1.5">Quick Swatches</div>
+          <div className="text-[10px] font-bold text-slate-400 uppercase mb-1.5">Swatches</div>
           <div className="flex flex-wrap gap-1.5">
             {presetSwatches.map((swatch) => (
               <button

@@ -15,6 +15,7 @@ import {
 import { soundFX } from './soundEffects';
 
 export interface GameEngineState {
+  matchId: string;
   players: Player[]; // Active 4 players on court [0..3]
   waitingQueue: Player[]; // Players on bench (6 characters)
   humanPlayerId: string;
@@ -40,29 +41,44 @@ export interface GameEngineState {
   } | null;
 }
 
+const BALL_RADIUS = 0.22;
+export const BOT_RETURN_DELAY_MS = 180;
+const GRAVITY = 9.8;
+
+function timeToCourt(ball: BallState) {
+  const height = Math.max(0, ball.y - BALL_RADIUS);
+  return (ball.vy + Math.sqrt(ball.vy ** 2 + 2 * GRAVITY * height)) / GRAVITY;
+}
+
+export function incomingReturn(state: GameEngineState) {
+  const ball = state.ballState;
+  if (!ball.isLive || ball.hasBouncedThisPlay || state.isGameOver || state.isPaused) return;
+  const seconds = timeToCourt(ball);
+  const landing = evaluateBallLanding(ball.x + ball.vx * seconds, ball.z + ball.vz * seconds, state.ruleSet);
+  if (landing.isOutOfBounds || landing.square === ball.lastHitterSquare ||
+    (state.rallyCount === 0 && landing.square !== 4)) return;
+  const player = state.players.find(({ rank }) => rank === landing.square);
+  return player ? { player, seconds } : undefined;
+}
+
 export function createInitialState(
   ruleSet: RuleSet = 'league',
-  customEquippedCharId?: string
+  customEquippedCharId?: string,
+  customOpponentCharId?: string,
+  lineupIds?: readonly string[],
 ): GameEngineState {
-  const equippedId = customEquippedCharId || getEquippedCharacterId();
+  const equippedId = customEquippedCharId || (typeof window === 'undefined' ? undefined : getEquippedCharacterId());
   const equippedDef = CHARACTERS.find((c) => c.id === equippedId) || CHARACTERS[0];
 
-  // The remaining 9 characters
-  const otherDefs = CHARACTERS.filter((c) => c.id !== equippedDef.id);
-
-  // Active court positions:
-  // Square 1 (King): otherDefs[0] (or King Rex if available)
-  // Square 2 (Contender): otherDefs[1]
-  // Square 3 (Challenger): YOU (human equipped character)
-  // Square 4 (Rookie): otherDefs[2]
-  // Queue bench: otherDefs[3..8] (6 waiting players)
-
-  const kingDef = otherDefs.find((c) => c.archetype === 'king_rex') || otherDefs[0];
+  const selectedOpponent = CHARACTERS.find((c) => c.id === customOpponentCharId && c.id !== equippedDef.id);
+  const otherDefs = CHARACTERS.filter((c) => c.id !== equippedDef.id && c.id !== selectedOpponent?.id);
+  const selectedCpu = [...new Set(lineupIds)].filter((id) => id !== equippedDef.id)
+    .flatMap((id) => CHARACTERS.filter((character) => character.id === id));
+  const validLineup = lineupIds?.includes(equippedDef.id) && selectedCpu.length === 3;
+  const kingDef = validLineup ? selectedCpu[0] : otherDefs.find((c) => c.archetype === 'king_rex') || otherDefs[0];
   const remainingDefs = otherDefs.filter((c) => c.id !== kingDef.id);
-
-  const contenderDef = remainingDefs[0];
-  const rookieDef = remainingDefs[1];
-  const benchDefs = remainingDefs.slice(2);
+  const contenderDef = validLineup ? selectedCpu[1] : selectedOpponent ?? remainingDefs[0];
+  const rookieDef = validLineup ? selectedCpu[2] : selectedOpponent ? remainingDefs[0] : remainingDefs[1];
 
   const humanPlayer: Player = {
     id: `player-human-${equippedDef.id}`,
@@ -148,9 +164,10 @@ export function createInitialState(
   const activePlayers = [kingPlayer, contenderPlayer, humanPlayer, rookiePlayer];
   const queuePlayers: Player[] = [];
 
-  const currentCoins = getStoredCoins();
+  const currentCoins = typeof window === 'undefined' ? 0 : getStoredCoins();
 
   return {
+    matchId: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
     players: activePlayers,
     waitingQueue: queuePlayers,
     humanPlayerId: humanPlayer.id,
@@ -193,6 +210,20 @@ export function createInitialState(
   };
 }
 
+export function createSoloLineup(ruleSet: RuleSet, lineup: readonly string[], name: string, seat: SquareId): GameEngineState {
+  const state = createInitialState(ruleSet, lineup[seat - 1], undefined, lineup);
+  if (lineup.length !== 4 || new Set(lineup).size !== 4 ||
+    !lineup.every((id) => state.players.some(({ characterId }) => characterId === id))) return state;
+  const players = lineup.map((id, index) => {
+    const player = state.players.find(({ characterId }) => characterId === id)!;
+    return { ...player, rank: (index + 1) as SquareId, title: ['King', 'Contender', 'Challenger', 'Rookie'][index],
+      name: player.isHuman ? name.trim() || 'Player' : player.name };
+  });
+  const king = players[0];
+  return { ...state, players, servingPlayerId: king.id, activeTurnPlayerId: king.id,
+    refereeCall: { ...state.refereeCall, message: `${king.name} serves to Square 4!` } };
+}
+
 /**
  * Calculates ball trajectory parameters to land near target (tx, tz)
  */
@@ -231,9 +262,8 @@ export function calculateBallTrajectory(
   const vz = dz / duration;
 
   // Ballistic arc matching physics loop gravity g = 9.8
-  const g = 9.8;
   // y(t) = y0 + vy * t - 0.5 * g * t^2 -> 0.22 = y0 + vy * duration - 0.5 * g * duration^2
-  const vy = (0.22 - startY + 0.5 * g * duration * duration) / duration;
+  const vy = (BALL_RADIUS - startY + 0.5 * GRAVITY * duration * duration) / duration;
 
   return { vx, vy, vz, duration };
 }
@@ -249,9 +279,22 @@ export function executeHit(
   customTargetCoords?: { x: number; z: number }
 ): GameEngineState {
   const hitter = state.players.find((p) => p.id === hitterId);
-  if (!hitter || !hitter.rank) return state;
+  if (!hitter?.rank || state.isGameOver || state.isPaused) return state;
 
   const isServe = state.ballState.isServing;
+  if (isServe) {
+    if (hitterId !== state.servingPlayerId) return state;
+    if (targetSquare !== 4 || shotType !== 'normal') {
+      return resetServe(state, 'Serve underhand to Square 4.');
+    }
+  } else {
+    if (!state.ballState.isLive || hitterId === state.ballState.lastHitterId) return state;
+    if (state.ballState.hasBouncedThisPlay) {
+      if (hitterId !== state.activeTurnPlayerId) return state;
+    } else if (shotType !== 'volley' || state.ruleSet === 'school' || state.rallyCount === 0) {
+      return state;
+    }
+  }
 
   // Sound effect
   soundFX.playHandStrike(shotType === 'volley');
@@ -277,7 +320,7 @@ export function executeHit(
   }
 
   // Safety check: ensure aim doesn't hit inside line by accident unless low skill
-  if (hitter.isHuman || Math.random() < hitter.skill) {
+  if (!customTargetCoords && (hitter.isHuman || Math.random() < hitter.skill)) {
     if (Math.abs(tx) < LINE_HALF_WIDTH + 0.3) {
       tx = tx >= 0 ? LINE_HALF_WIDTH + 0.5 : -(LINE_HALF_WIDTH + 0.5);
     }
@@ -286,10 +329,9 @@ export function executeHit(
     }
   }
 
-  const serveHandPos = SQUARE_CONFIGS[hitter.rank].defaultPlayerPos;
-  const startX = isServe ? serveHandPos[0] * 0.88 : state.ballState.x;
-  const startY = isServe ? 0.92 : Math.max(0.55, state.ballState.y);
-  const startZ = isServe ? serveHandPos[2] * 0.88 : state.ballState.z;
+  const { x: startX, y: startY, z: startZ } = isServe
+    ? serveContactPosition(hitter.rank)
+    : state.ballState;
 
   const { vx, vy, vz } = calculateBallTrajectory(
     startX,
@@ -305,12 +347,10 @@ export function executeHit(
     p.id === hitterId ? { ...p, totalHits: p.totalHits + 1, points: (p.points || 0) + 25 } : p
   );
 
-  const targetPlayer = state.players.find((p) => p.rank === targetSquare);
-
   return {
     ...state,
     players: updatedPlayers,
-    activeTurnPlayerId: targetPlayer ? targetPlayer.id : null,
+    activeTurnPlayerId: null,
     rallyCount: isServe ? 0 : state.rallyCount + 1,
     ballState: {
       ...state.ballState,
@@ -329,12 +369,78 @@ export function executeHit(
       isLive: true,
       isServing: false,
       hitCount: (state.ballState.hitCount ?? 0) + 1,
+      lastContact: { x: startX, y: startY, z: startZ },
     },
     refereeCall: {
       type: 'clean_hit',
       message: `${hitter.name} strikes to Square ${targetSquare}!`,
       subMessage: shotType === 'volley' ? '⚡ Clean volley strike in flight!' : 'Clean hit, play on!',
       timestamp: Date.now(),
+    },
+  };
+}
+
+export function serveContactPosition(square: SquareId) {
+  const [x, , z] = SQUARE_CONFIGS[square].defaultPlayerPos;
+  const yaw = Math.atan2(-x, -z);
+  return {
+    x: x * 0.88 + Math.sin(yaw) * 0.44 + Math.cos(yaw) * 0.16,
+    y: 0.86,
+    z: z * 0.88 + Math.cos(yaw) * 0.44 - Math.sin(yaw) * 0.16,
+  };
+}
+
+export function advanceBall(state: GameEngineState, elapsedSeconds: number): GameEngineState {
+  const ball = state.ballState;
+  if (!ball.isLive || state.isGameOver || state.isPaused || elapsedSeconds <= 0) return state;
+
+  const timeToBounce = timeToCourt(ball);
+  const time = Math.min(elapsedSeconds, timeToBounce);
+  const x = ball.x + ball.vx * time;
+  const z = ball.z + ball.vz * time;
+  const vy = ball.vy - GRAVITY * time;
+
+  if (elapsedSeconds < timeToBounce) {
+    const y = ball.y + ball.vy * time - GRAVITY * time ** 2 / 2;
+    return { ...state, ballState: { ...ball, x, y, z, vy } };
+  }
+
+  soundFX.playBallBounce();
+  if (ball.hasBouncedThisPlay) {
+    const owner = state.players.find((player) => player.rank === ball.currentSquareOwner);
+    if (!owner) return state;
+    if (state.rallyCount === 0) return handleReceiverFault(state, owner, 'Missed the serve return');
+    return eliminatePlayer(state, owner.id, `Missed the return from Square ${owner.rank}`, 'double_bounce_out');
+  }
+
+  const landing = evaluateBallLanding(x, z, state.ruleSet);
+  if (state.rallyCount === 0 && landing.square !== 4) {
+    return resetServe(state, 'Serve must first bounce in Square 4.');
+  }
+
+  const hitOwnSquare = landing.square !== null && landing.square === ball.lastHitterSquare;
+  if (landing.isOutOfBounds || hitOwnSquare) {
+    const hitter = state.players.find((player) => player.id === ball.lastHitterId);
+    if (!hitter) return state;
+    const reason = hitOwnSquare ? 'Hit into own square' : landing.description;
+    if (state.rallyCount === 1 && hitter.rank === 4) return handleReceiverFault(state, hitter, reason);
+    const call = hitOwnSquare ? 'own_square_out' : landing.isInsideLine ? 'inside_line_out' : 'outside_court_out';
+    return eliminatePlayer(state, hitter.id, reason, call);
+  }
+
+  const receiver = state.players.find((player) => player.rank === landing.square);
+  return {
+    ...state,
+    activeTurnPlayerId: receiver?.id ?? null,
+    ballState: {
+      ...ball,
+      x,
+      y: BALL_RADIUS,
+      z,
+      vy: -vy * 0.76,
+      bounceCountInCurrentSquare: 1,
+      currentSquareOwner: landing.square,
+      hasBouncedThisPlay: true,
     },
   };
 }
@@ -348,6 +454,7 @@ export function eliminatePlayer(
   reason: string,
   callType: RefereeCall['type']
 ): GameEngineState {
+  if (state.isGameOver) return state;
   const eliminatedPlayer = state.players.find((p) => p.id === eliminatedPlayerId);
   if (!eliminatedPlayer || !eliminatedPlayer.rank) return state;
 
@@ -355,19 +462,20 @@ export function eliminatePlayer(
 
   // Sound effects
   soundFX.playWhistle();
-  soundFX.playAww();
 
   // If eliminated player was King (1), check if they set a record
   // If human player in 1 was not eliminated, increment crown hold!
   const kingPlayer = state.players.find((p) => p.rank === 1);
   const kingSurvived = kingPlayer && kingPlayer.id !== eliminatedPlayerId;
 
-  // Clone players and queue
+  const faults = (eliminatedPlayer.faults || 0) + 1;
   const outPlayer: Player = {
     ...eliminatedPlayer,
     rank: null,
     title: 'Waiting Queue',
     crownHolds: 0,
+    faults,
+    points: Math.max(0, eliminatedPlayer.totalHits * 25 - faults * 50),
     totalEliminations: eliminatedPlayer.totalEliminations + 1,
   };
 
@@ -419,19 +527,11 @@ export function eliminatePlayer(
     });
   });
 
-  // Eliminated player drops directly to Square 4 (Rookie)
-  const elimFaults = (eliminatedPlayer.faults || 0) + 1;
-  const elimElims = eliminatedPlayer.totalEliminations + 1;
-  const elimPoints = Math.max(0, (eliminatedPlayer.totalHits || 0) * 25 - elimFaults * 50);
-
   rotatedPlayers.push({
-    ...eliminatedPlayer,
+    ...incomingPlayer,
     rank: 4,
     title: 'Rookie',
     crownHolds: 0,
-    faults: elimFaults,
-    totalEliminations: elimElims,
-    points: elimPoints,
   });
 
   // Sort by rank 1, 2, 3, 4
@@ -445,13 +545,11 @@ export function eliminatePlayer(
 
   if (isGameOver && crownWinner) {
     soundFX.playCheer();
-    soundFX.playSchoolPAChime();
-    soundFX.playRefereeWhistle();
   }
 
   // Calculate earned coins
   const humanPlayer = rotatedPlayers.find((p) => p.id === state.humanPlayerId);
-  let earnedCoins = 10; // 10 coins per round
+  let earnedCoins = state.humanPlayerId ? 10 : 0;
   if (humanPlayer && humanPlayer.rank === 1 && kingSurvived) {
     earnedCoins += 50; // Bonus for surviving round as King!
   }
@@ -459,7 +557,7 @@ export function eliminatePlayer(
     earnedCoins += 500; // Championship bonus!
   }
   const nextCoins = state.coins + earnedCoins;
-  saveStoredCoins(nextCoins);
+  if (earnedCoins > 0 && typeof window !== 'undefined') saveStoredCoins(nextCoins);
 
   return {
     ...state,
@@ -491,9 +589,10 @@ export function eliminatePlayer(
     },
     refereeCall: {
       type: callType,
-      message: `${eliminatedPlayer.name} is OUT! (${reason})`,
-      subMessage: `${newKing.name} steps up to Square 1 to serve diagonal to Square 4!`,
+      message: `${reason} · ${eliminatedPlayer.name} out`,
+      subMessage: `${newKing.name} serves to Square 4.`,
       offendingPlayerName: eliminatedPlayer.name,
+      offendingSquare: eliminatedRank,
       timestamp: Date.now(),
     },
   };
@@ -533,8 +632,10 @@ export function handleReceiverFault(
       },
       refereeCall: {
         type: 'serve_fault_one',
-        message: `Fault: ONE on ${receiver.name}! (${reason})`,
-        subMessage: 'Receiver gets 1 fault allowance. Replay the serve!',
+        message: `${reason} · Replay serve`,
+        subMessage: `First receiver fault on ${receiver.name}.`,
+        offendingPlayerName: receiver.name,
+        offendingSquare: receiver.rank ?? undefined,
         timestamp: Date.now(),
       },
     };
@@ -544,7 +645,7 @@ export function handleReceiverFault(
   return eliminatePlayer(
     state,
     receiver.id,
-    `Receiver 2nd fault / illegal return (${reason})`,
+    reason,
     'serve_fault_out'
   );
 }
