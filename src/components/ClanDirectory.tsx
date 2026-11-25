@@ -50,6 +50,7 @@ export function ClanDirectory({ results }: { results: LeagueRow[] }) {
 
   return <section aria-label="Clans" className="space-y-4">
     <nav aria-label="Clan views" className="flex flex-wrap gap-2">
+      <a className="league-button" href={`${(import.meta.env.VITE_CLAN_HUB_URL || 'http://localhost:4110').replace(/\/$/, '')}/?game=four-square`} target="_blank" rel="noopener">Cross-game clans</a>
       <button className="league-button" aria-pressed={mode === 'browse'} onClick={() => setMode('browse')}>Find a clan</button>
       <button className="league-button" aria-pressed={mode === 'mine'} onClick={() => setMode('mine')}>My clan</button>
     </nav>
