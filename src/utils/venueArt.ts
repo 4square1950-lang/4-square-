@@ -25,7 +25,7 @@ const artByVenue: Partial<Record<VenueId, VenueArt>> = {
 };
 
 export function venueStill(id: VenueId) {
-  return `/assets/venues/${id}.jpg`;
+  return `${import.meta.env.BASE_URL}assets/venues/${id}.jpg`;
 }
 
 export function getVenueArt(id: VenueId): VenueArt {

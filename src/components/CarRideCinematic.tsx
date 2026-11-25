@@ -186,7 +186,7 @@ export const CarRideCinematic: React.FC<CarRideCinematicProps> = ({
     let disposed = false;
     let daylight: THREE.DataTexture | undefined;
     // Cloud Layers by Greg Zaal (Poly Haven, CC0), used for daylight and reflections.
-    new HDRLoader().load('/assets/lighting/cloud-layers-1k.hdr', (texture) => {
+    new HDRLoader().load(`${import.meta.env.BASE_URL}assets/lighting/cloud-layers-1k.hdr`, (texture) => {
       if (disposed) {
         texture.dispose();
         return;
