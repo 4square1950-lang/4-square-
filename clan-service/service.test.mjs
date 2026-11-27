@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import {once} from 'node:events';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {test} from 'node:test';
 import {createClanServer} from './service.mjs';
 
@@ -9,8 +12,8 @@ const clan = {
   language: 'English', classification: 'Competitive', privacy: 'Public'
 };
 
-test('a clan spans games and enforces membership and moderation permissions', async (t) => {
-  const server = createClanServer({origin, development: true});
+test('a game enforces membership and moderation permissions', async (t) => {
+  const server = createClanServer({game: 'four-square', origin, development: true});
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -48,14 +51,11 @@ test('a clan spans games and enforces membership and moderation permissions', as
   await expect(group + '/join', recruit, {});
 
   const me = await expect('/api/me', recruit);
-  assert.equal(me.games.length, 6);
+  assert.equal(me.sport.id, 'four-square');
   assert.equal(me.member.clan, id);
-  const {id: division} = await expect(group + '/division', founder, {game: 'tetherball', name: 'Court crew'});
-  await expect(group + '/division', founder, {game: 'ringette', name: 'Ice crew'});
-  for (const game of ['tetherball', 'ringette']) {
-    const results = await expect('/api/directory?game=' + game, null);
-    assert.equal(results[0].id, id);
-  }
+  const {id: division} = await expect(group + '/division', founder, {name: 'Court crew'});
+  await expect(group + '/division', founder, {game: 'ringette', name: 'Ice crew'}, 400);
+  assert.equal((await expect('/api/directory', null))[0].id, id);
 
   await expect(group + '/rank', recruit, {player: me.player.id, role: 'Officer'}, 403);
   await expect(group + '/chat?channel=officers', recruit, null, 403);
@@ -67,4 +67,49 @@ test('a clan spans games and enforces membership and moderation permissions', as
   const founderId = (await expect('/api/me', founder)).player.id;
   await expect(group + '/block', recruit, {player: founderId});
   assert.deepEqual(await expect(group + '/chat?channel=' + division, recruit), []);
+});
+
+test('games isolate directories, sessions, clan IDs, and memberships', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'sport-clans-'));
+  const running = [];
+  t.after(async () => {
+    await Promise.all(running.map(server => new Promise(resolve => server.close(resolve))));
+    await rm(dir, {recursive: true, force: true});
+  });
+  async function gameApi(game, sportOrigin) {
+    const database = join(dir, game + '.sqlite');
+    const server = createClanServer({game, database, origin: sportOrigin, development: true});
+    running.push(server);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const base = 'http://127.0.0.1:' + server.address().port;
+    return (path, body, cookie) => fetch(base + path, {
+      redirect: 'manual', method: body ? 'POST' : 'GET',
+      headers: {origin: sportOrigin, 'content-type': 'application/json', ...(cookie && {cookie})},
+      body: body && JSON.stringify(body)
+    });
+  }
+
+  const four = await gameApi('four-square', origin);
+  const tether = await gameApi('tetherball', 'http://localhost:4111');
+  async function signIn(api) {
+    const response = await api('/auth/dev', {name: 'Same player'});
+    assert.equal(response.status, 303);
+    return response.headers.getSetCookie()[0].split(';')[0];
+  }
+  const fourCookie = await signIn(four);
+  const first = await four('/api/clans', clan, fourCookie);
+  assert.equal(first.status, 201);
+  const {id: firstId} = await first.json();
+  assert.deepEqual(await (await tether('/api/directory?game=four-square')).json(), []);
+  assert.equal((await (await tether('/api/me', null, fourCookie)).json()).player, undefined);
+  const tetherCookie = await signIn(tether);
+  assert.equal((await tether('/api/clans/' + firstId, null, tetherCookie)).status, 404);
+  const second = await tether('/api/clans', clan, tetherCookie);
+  assert.equal(second.status, 201, 'the same tag and player can exist independently in both games');
+  const {id: secondId} = await second.json();
+  assert.notEqual(firstId, secondId);
+  assert.equal((await (await four('/api/me', null, fourCookie)).json()).member.clan, firstId);
+  assert.equal((await (await tether('/api/me', null, tetherCookie)).json()).member.clan, secondId);
+  assert.throws(() => createClanServer({game:'ringette', database:join(dir, 'tetherball.sqlite')}), /belongs to tetherball/);
 });

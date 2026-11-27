@@ -42,7 +42,21 @@ function clanFields(body){
     option(body.classification,['Casual','Competitive','Professional']),option(body.privacy,['Public','Private','Invite only']),clean(body.requirements??'',240)];
 }
 
-export function createClanServer({database=':memory:',origin='http://localhost:4110',development=false,fetchSteam=fetch}={}){
+export const clanGames = {
+  'four-square': {name:'Four Square',port:4110},
+  tetherball: {name:'Tetherball',port:4111},
+  ministicks: {name:'Ministicks',port:4112},
+  ringette: {name:'Ringette',port:4113},
+  'water-polo': {name:'Water Polo',port:4114},
+  playground: {name:'Playground Games',port:4115}
+};
+
+export function createClanServer({game,database=':memory:',origin,development=false,fetchSteam=fetch}={}){
+  if(!Object.hasOwn(clanGames,game))throw new Error('Choose one sport for this clan server.');
+  const sport={id:game,...clanGames[game]};
+  origin??='http://localhost:'+sport.port;
+  const sessionCookie='clan_session_'+game;
+  const challengeCookie='clan_challenge_'+game;
   const location=new URL(origin);
   const local=['localhost','127.0.0.1','[::1]'].includes(location.hostname);
   if(location.pathname!=='/'||location.search||location.hash||(!local&&location.protocol!=='https:'))throw new Error('Use a localhost or HTTPS clan origin.');
@@ -58,6 +72,20 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
     db.exec('BEGIN IMMEDIATE');
     try{const value=task();db.exec('COMMIT');return value;}catch(error){db.exec('ROLLBACK');throw error;}
   };
+  try {
+    tx(()=>{
+      db.exec('CREATE TABLE IF NOT EXISTS clan_scope(game TEXT PRIMARY KEY REFERENCES games(id))');
+      const existing=get('SELECT game FROM clan_scope');
+      if(existing&&existing.game!==game)throw new Error('This database belongs to '+existing.game+'. Use a separate database for '+game+'.');
+      if(!existing){
+        if(get('SELECT 1 FROM clans LIMIT 1'))throw new Error('This is a legacy shared database. Use a new per-game database.');
+        run('INSERT INTO clan_scope VALUES(?)',game);
+      }
+    });
+  } catch(error) {
+    db.close();
+    throw error;
+  }
   function reply(res,status,value){
     res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
     res.end(JSON.stringify(value));
@@ -68,13 +96,13 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
   function setCookie(name,value,max,extra=''){
     return name+'='+value+'; HttpOnly; SameSite=Lax; Path=/; Max-Age='+max+(location.protocol==='https:'?'; Secure':'')+extra;
   }
-  function session(res,id,name,game){
+  function session(res,id,name){
     run('INSERT OR IGNORE INTO players(id,name) VALUES(?,?)',id,name);
     run('DELETE FROM sessions WHERE expires<?',Date.now());
     const sessionId=token();
     run('INSERT INTO sessions VALUES(?,?,?)',hash(sessionId),id,Date.now()+14*day);
-    res.setHeader('Set-Cookie',setCookie('clan_session',sessionId,1209600));
-    res.writeHead(303,{Location:'/?game='+encodeURIComponent(game||'')}).end();
+    res.setHeader('Set-Cookie',setCookie(sessionCookie,sessionId,1209600));
+    res.writeHead(303,{Location:'/'}).end();
   }
   const membership=(player)=>get('SELECT m.*,c.suspended FROM members m JOIN clans c ON c.id=m.clan WHERE m.player=?',player);
   function member(player,clan,rank='Recruit'){
@@ -126,24 +154,23 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
         run('INSERT INTO login_challenges VALUES(?,?)',hash(challenge),now+600000);
         const callback=new URL('/auth/steam/return',location);
         callback.searchParams.set('challenge',challenge);
-        callback.searchParams.set('game',query.get('game')||'');
         const redirect=new URL(steam), target=redirect.searchParams;
         target.set('openid.ns','http://specs.openid.net/auth/2.0');
         target.set('openid.mode','checkid_setup');
         target.set('openid.return_to',callback.href);
         target.set('openid.realm',location.origin+'/');
         for(const key of ['claimed_id','identity'])target.set('openid.'+key,'http://specs.openid.net/auth/2.0/identifier_select');
-        res.setHeader('Set-Cookie',setCookie('clan_challenge',challenge,600));
+        res.setHeader('Set-Cookie',setCookie(challengeCookie,challenge,600));
         return res.writeHead(302,{Location:redirect.href}).end();
       }
       if(method==='GET'&&url.pathname==='/auth/steam/return'){
         const state=query.get('challenge')||'';
-        if(!/^[a-f0-9]{64}$/.test(state)||cookie(req,'clan_challenge')!==state||
+        if(!/^[a-f0-9]{64}$/.test(state)||cookie(req,challengeCookie)!==state||
           !run('DELETE FROM login_challenges WHERE id=? AND expires>=?',hash(state),now).changes)fail(403,'Steam sign-in expired.');
         const identity=query.get('openid.claimed_id')||'';
         const id=/^https?:\/\/steamcommunity\.com\/openid\/id\/(\d{17})$/.exec(identity)?.[1];
         const returnTo=new URL('/auth/steam/return',location);
-        returnTo.searchParams.set('challenge',state);returnTo.searchParams.set('game',query.get('game')||'');
+        returnTo.searchParams.set('challenge',state);
         if(!id||query.get('openid.mode')!=='id_res'||query.get('openid.identity')!==identity||
           query.get('openid.op_endpoint')!==steam||query.get('openid.return_to')!==returnTo.href)fail(403,'Invalid Steam identity response.');
         const signed=(query.get('openid.signed')||'').split(',');
@@ -152,29 +179,26 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
         form.set('openid.mode','check_authentication');
         const verification=await fetchSteam(steam,{method:'POST',body:form,redirect:'error',signal:AbortSignal.timeout(8000)});
         if(!verification.ok||!(await verification.text()).split(/\r?\n/).includes('is_valid:true'))fail(403,'Steam could not verify this sign-in.');
-        return session(res,'steam:'+id,'Steam player '+id.slice(-5),query.get('game'));
+        return session(res,'steam:'+id,'Steam player '+id.slice(-5));
       }
       if(method==='POST'&&url.pathname==='/auth/dev'){
         if(!development||!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(ip))fail(404,'Development sign-in is disabled.');
         const body=await json(req), name=clean(body.name,32,3);
-        return session(res,'dev:'+hash(name.toLowerCase()),name,'');
+        return session(res,'dev:'+hash(name.toLowerCase()),name);
       }
       if(parts[0]!=='api')fail(404,'Page not found.');
-      const player=get('SELECT p.* FROM sessions s JOIN players p ON p.id=s.player WHERE s.id=? AND s.expires>=?',hash(cookie(req,'clan_session')),now);
+      const player=get('SELECT p.* FROM sessions s JOIN players p ON p.id=s.player WHERE s.id=? AND s.expires>=?',hash(cookie(req,sessionCookie)),now);
       const current=player?membership(player.id):null;
-      if(method==='GET'&&parts[1]==='me')return reply(res,200,{player,member:current,development,games:all('SELECT * FROM games ORDER BY name')});
+      if(method==='GET'&&parts[1]==='me')return reply(res,200,{player,member:current,development,sport});
       if(method==='GET'&&parts[1]==='directory'){
         const filter=(query.get('q')||'').slice(0,40);
-        const game=(query.get('game')||'').slice(0,30);
-        return reply(res,200,all(`SELECT c.*, (SELECT count(*) FROM members WHERE clan=c.id) AS count,
-          (SELECT group_concat(DISTINCT game) FROM divisions WHERE clan=c.id) AS games FROM clans c
+        return reply(res,200,all(`SELECT c.*, (SELECT count(*) FROM members WHERE clan=c.id) AS count FROM clans c
           WHERE c.suspended=0 AND c.privacy<>'Private' AND (instr(lower(c.name),lower(?)) OR instr(lower(c.tag),lower(?)))
-          AND (?='' OR EXISTS (SELECT 1 FROM divisions WHERE clan=c.id AND game=?))
-          ORDER BY count DESC,c.name LIMIT 100`,filter,filter,game,game));
+          ORDER BY count DESC,c.name LIMIT 100`,filter,filter));
       }
       if(method==='POST'&&parts[1]==='logout'){
-        run('DELETE FROM sessions WHERE id=?',hash(cookie(req,'clan_session')));
-        res.setHeader('Set-Cookie',setCookie('clan_session','',0));return reply(res,200,{});
+        run('DELETE FROM sessions WHERE id=?',hash(cookie(req,sessionCookie)));
+        res.setHeader('Set-Cookie',setCookie(sessionCookie,'',0));return reply(res,200,{});
       }
       if(!player)fail(401,'Sign in to manage clans.');
       const uid=player.id;
@@ -253,9 +277,9 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
           audit(id,uid,action,b.player);
         } else if(action==='division'){
           member(uid,id,'Captain');
-          if(!get('SELECT 1 FROM games WHERE id=?',b.game))fail(400,'Unknown sport.');
+          if(b.game!==undefined&&b.game!==game)fail(400,'Choose a division for '+sport.name+'.');
           const division=randomUUID();
-          run('INSERT INTO divisions VALUES(?,?,?,?,?)',division,id,b.game,clean(b.name,45,2),uid);
+          run('INSERT INTO divisions VALUES(?,?,?,?,?)',division,id,game,clean(b.name,45,2),uid);
           run('INSERT INTO division_members VALUES(?,?)',division,uid);
           audit(id,uid,'Create division',division);
           return {id:division};
@@ -317,8 +341,17 @@ export function createClanServer({database=':memory:',origin='http://localhost:4
 }
 
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
-  const port=Number(process.env.CLAN_PORT||4110);
-  const origin=process.env.CLAN_ORIGIN||'http://localhost:'+port;
-  const server=createClanServer({database:process.env.CLAN_DB||'.game-data/clans.sqlite',origin,development:process.env.CLAN_DEV==='1'});
-  server.listen(port,process.env.CLAN_HOST||'127.0.0.1',()=>console.log('Clan hub: '+origin));
+  const requested=process.env.CLAN_GAME;
+  const development=process.env.CLAN_DEV==='1';
+  if(!requested&&(!development||process.env.CLAN_PORT||process.env.CLAN_ORIGIN||process.env.CLAN_DB||process.env.CLAN_HOST)){
+    throw new Error('Set CLAN_GAME to configure one clan server.');
+  }
+  if(requested&&!Object.hasOwn(clanGames,requested))throw new Error('Unknown CLAN_GAME.');
+  for(const game of requested?[requested]:Object.keys(clanGames)){
+    const {name,port:defaultPort}=clanGames[game];
+    const port=Number(process.env.CLAN_PORT||defaultPort);
+    const origin=process.env.CLAN_ORIGIN||'http://localhost:'+port;
+    const server=createClanServer({game,database:process.env.CLAN_DB||'.game-data/clans/'+game+'.sqlite',origin,development});
+    server.listen(port,process.env.CLAN_HOST||'127.0.0.1',()=>console.log(name+' clans at '+origin));
+  }
 }

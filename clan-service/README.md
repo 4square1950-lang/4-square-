@@ -1,23 +1,29 @@
-# Cross-game clans
+# Game-specific clans
 
-Four Square, Tetherball, Ministicks, Ringette, Water Polo, and Playground Games share one clan account and one clan membership. A clan can field separate divisions in each sport. Games open a common hub and pass their sport in the URL.
+Each game has its own clan page, SQLite database, sign-in session, directory, and membership. A player can belong to one clan per game. Clan names and tags are unique within their game. Divisions, recruitment, inbox, chat, and moderation are scoped to that game's database.
 
 ## Local playtest
 
-Use Node.js 24 or later. On PowerShell, run these from the Four Square directory.
+Run from the Four Square directory with Node.js 24 or later.
 
 ```powershell
 $env:CLAN_DEV = '1'
 node clan-service/service.mjs
-node --test clan-service/service.test.mjs
 ```
 
-Open `http://localhost:4110`. Loopback development sign-in supports testing with two accounts in separate browser profiles. The default SQLite database lives in `.game-data/clans.sqlite`.
+| Game | Local clan page |
+| --- | --- |
+| Four Square | http://localhost:4110/ |
+| Tetherball | http://localhost:4111/ |
+| Ministicks | http://localhost:4112/ |
+| Ringette | http://localhost:4113/ |
+| Water Polo | http://localhost:4114/ |
+| Playground Games | http://localhost:4115/ |
+
+Local testing starts all six listeners with separate databases under `.game-data/clans/`. To start just one, set `CLAN_GAME` to its ID. Run the API checks with `node --test clan-service/service.test.mjs`. The previous shared playtest databases are preserved. Their clans had no single game assignment, so they require an explicit allocation if they should be imported.
 
 ## Hosting
 
-Serve the hub behind HTTPS with `CLAN_ORIGIN` set to its public origin. Use `CLAN_HOST` and `CLAN_PORT` for the reverse proxy address and `CLAN_DB` for a persistent SQLite location. Leave `CLAN_DEV` unset. Point the five static games' clan links and Four Square's `VITE_CLAN_HUB_URL` to the same public origin. Keep SQLite and its journal together when backing up.
+Run one instance per game with its own `CLAN_GAME`, HTTPS `CLAN_ORIGIN`, and persistent `CLAN_DB`. Use `CLAN_HOST` and `CLAN_PORT` for the reverse proxy target. Leave `CLAN_DEV` unset. Configure each game's clan link to its own origin. Four Square uses `VITE_CLAN_HUB_URL`. The others use a link in their HTML.
 
-The hub uses Steam OpenID for browser sign-in. Run a live Steam sign-in on the public origin before opening registration. Native Steam authentication tickets require a separate integration with the game servers.
-
-Current flows include clan creation, branding, roles, recruitment, roster and divisions, event scheduling, chat, blocks, and message reports. Competitive results, clan XP, rankings, wars, tournament brackets, and a platform moderation console still require separate implementation.
+The service supports Steam OpenID for browser sign-in. Verify that flow on each public origin before opening registration. Native Steam authentication, competitive results, clan XP, rankings, wars, tournament brackets, and a platform moderation console require separate work.

@@ -1,5 +1,4 @@
 const $=(id)=>document.getElementById(id);
-const game=new URLSearchParams(location.search).get('game')||'';
 const ranks=['Recruit','Member','Veteran','Captain','Officer','Co-Leader','Founder'];
 let me,active='Discover',selected,channel='general',view=0;
 
@@ -22,7 +21,6 @@ async function api(path,body){
 }
 const action=(id,name,body={})=>api('/api/clans/'+id+'/'+name,body);
 const rank=()=>ranks.indexOf(me.member?.role);
-const gameName=(id)=>me.games.find(item=>item.id===id)?.name||'All games';
 function input(name,title,type='text',value='',settings={}){
   const label=node('label',title),control=node('input');control.name=name;control.type=type;control.value=value;
   Object.assign(control,settings);label.append(control);return label;
@@ -48,9 +46,11 @@ async function refresh(section=active){
   account.replaceChildren();
   if(me.player)account.append(node('span',me.player.name),button('Sign out',async()=>{await api('/api/logout',{});await refresh('Discover');}));
   else{
-    const steam=node('a','Sign in with Steam','action primary');steam.href='/auth/steam?game='+encodeURIComponent(game);account.append(steam);
+    const steam=node('a','Sign in with Steam','action primary');steam.href='/auth/steam';account.append(steam);
   }
-  $('game').textContent=gameName(game);
+  $('game').textContent=me.sport.name;
+  $('clanBrand').textContent=me.sport.name;
+  document.title=me.sport.name+' | Clans';
   const tabs=['Discover',...(me.player?(me.member?['My clan','Inbox']:['Create clan','Inbox']):[])];
   if(!tabs.includes(section))section='Discover';
   $('tabs').replaceChildren(...tabs.map(tab=>button(tab,()=>refresh(tab),tab===section?'primary':'')));
@@ -75,23 +75,22 @@ async function directory(){
     },'Enter local test')));
   }
   const search=node('input','','directory-search');search.placeholder='Find a clan by name or tag';search.setAttribute('aria-label','Search clans');
-  const games=pick('','Sport',[['','All games'],...me.games.map(item=>[item.id,item.name])],'');
-  const select=games.querySelector('select'),results=node('div','','cards');
+  const results=node('div','','cards');
   let lookup=0;
   const update=async()=>{
     const key=++lookup;
-    const clans=await api('/api/directory?'+new URLSearchParams({q:search.value,game:select.value}));
+    const clans=await api('/api/directory?'+new URLSearchParams({q:search.value}));
     if(key!==lookup)return;
     results.replaceChildren(...clans.map(clan=>{
       const controls=row();
       if(me.player)controls.append(button('View clan',async()=>$('content').replaceChildren(await details(clan.id))));
       return card(row(emblem(clan),node('h2',clan.name+' ['+clan.tag+']')),node('p',clan.slogan),node('small',clan.count+' / '+clan.capacity+' members · '+clan.region+' · '+clan.language),
-        node('p',clan.classification+' · '+clan.privacy,'muted'),node('p',(clan.games||'').split(',').filter(Boolean).map(gameName).join(' · '),'muted'),controls);
+        node('p',clan.classification+' · '+clan.privacy,'muted'),controls);
     }));
     if(!clans.length)results.append(node('p','No clans found.'));
   };
-  search.oninput=()=>update().catch(showError);select.onchange=search.oninput;
-  panel.append(row(search,games),results);await update();return panel;
+  search.oninput=()=>update().catch(showError);
+  panel.append(search,results);await update();return panel;
 }
 function clanForm(existing){
   const clan=existing||{};
@@ -131,7 +130,7 @@ async function details(id){
     node('small',clan.region+' · '+clan.language+' · '+clan.classification+' · '+clan.privacy),node('p',clan.requirements),controls));
   const divisionCards=divisions.map(division=>{
     const roster=division.roster||[];
-    const rows=[node('h3',division.name),node('p',gameName(division.game)),
+    const rows=[node('h3',division.name),
       node('small',joined?'Captain: '+(members.find(person=>person.player===division.captain)?.name||'Vacant')+' · '+roster.length+' members':'')];
     if(joined)rows.push(row(button(roster.includes(me.player.id)?'Leave division':'Join division',async()=>{
       await action(id,'division-member',{division:division.id,leave:roster.includes(me.player.id)});await refresh('My clan');
@@ -142,8 +141,8 @@ async function details(id){
   divisionsList.append(...(divisionCards.length?divisionCards:[node('p','No divisions yet.')]));
   panel.append(card(node('h2','Divisions'),divisionsList));
   if(!joined)return panel;
-  if(rank()>=3)panel.append(card(node('h2','Create division'),form([input('name','Division name','text','',{required:true}),
-    pick('game','Sport',me.games.map(item=>[item.id,item.name]),game)],async(data)=>{await action(id,'division',data);await refresh('My clan');},'Create division')));
+  if(rank()>=3)panel.append(card(node('h2','Create division'),form([input('name','Division name','text','',{required:true})],
+    async(data)=>{await action(id,'division',data);await refresh('My clan');},'Create division')));
   const roster=card(node('h2','Members'));
   for(const person of members){
     const controls=row(node('span',person.name),node('small',person.role));controls.classList.add('person');
